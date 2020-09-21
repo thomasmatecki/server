@@ -1933,6 +1933,7 @@ skip_monitors:
 	if (err == DB_SUCCESS) {
 		err = dict_create_or_check_sys_virtual();
 	}
+
 	switch (err) {
 	case DB_SUCCESS:
 		break;

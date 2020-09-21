@@ -102,6 +102,13 @@ public:
 
 	int open(const char *name, int mode, uint test_if_locked) override;
 
+#ifdef WITH_INNODB_LEGACY_FOREIGN_STORAGE
+	bool auto_repair(int error) const override
+	{
+		return (error == HA_ERR_FK_UPGRADE);
+	}
+#endif /* WITH_INNODB_LEGACY_FOREIGN_STORAGE */
+
 	handler* clone(const char *name, MEM_ROOT *mem_root) override;
 
 	int close(void) override;
@@ -744,6 +751,10 @@ private:
 	/** Create the internal innodb table definition. */
 	int create_table_def();
 
+#ifdef WITH_INNODB_LEGACY_FOREIGN_STORAGE
+	int check_legacy_fk();
+#endif /* WITH_INNODB_LEGACY_FOREIGN_STORAGE */
+
 	/** Connection thread handle. */
 	THD*		m_thd;
 
@@ -996,3 +1007,8 @@ dict_load_foreigns(
 						charset compatibility */
 	dict_err_ignore_t	ignore_err)	/*!< in: error to be ignored */
 	MY_ATTRIBUTE((warn_unused_result));
+
+/** Check whether the table is empty.
+@param[in]	table	table to be checked
+@return true if table is empty */
+bool innobase_table_is_empty(const dict_table_t *table);
