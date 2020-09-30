@@ -775,6 +775,14 @@ struct TABLE_SHARE
   LEX_CSTRING normalized_path;		/* unpack_filename(path) */
   LEX_CSTRING connect_string;
 
+  int cmp_db_table(const LEX_CSTRING &_db, const LEX_CSTRING &_table_name) const
+  {
+    int res= ::cmp_table(_db, db);
+    if (res)
+      return res;
+    return ::cmp_table(_table_name, table_name);
+  }
+
   /* 
      Set of keys in use, implemented as a Bitmap.
      Excludes keys disabled by ALTER TABLE ... DISABLE KEYS.
@@ -1837,7 +1845,12 @@ class FK_info : public Sql_alloc
 {
 public:
   Lex_cstring foreign_id;
-  // TODO: use Table_name
+
+  /*
+    TODO: use Table_name. NB: the below names are in original case.
+    The share MUST be acquried in case according to lower_case_table_names.
+    Use for_table(), ref_table() for that (TODO: limit interface).
+  */
   Lex_cstring foreign_db;
   Lex_cstring foreign_table;
   Lex_cstring referenced_db;
@@ -1869,8 +1882,8 @@ public:
   }
   bool assign(Foreign_key &fk, Table_name table);
   FK_info * clone(MEM_ROOT *mem_root) const;
-  Table_name for_table(MEM_ROOT *mem_root) const;
-  Table_name ref_table(MEM_ROOT *mem_root) const;
+  Table_name for_table(MEM_ROOT *mem_root, bool copy= false) const;
+  Table_name ref_table(MEM_ROOT *mem_root, bool copy= false) const;
   void print(String &out);
 };
 
@@ -2163,7 +2176,7 @@ struct TABLE_LIST
 
   enum prelocking_types
   {
-    PRELOCK_NONE, PRELOCK_ROUTINE, PRELOCK_FK
+    PRELOCK_NONE, PRELOCK_ROUTINE, PRELOCK_FK, PRELOCK_RK
   };
 
   /**
@@ -2225,9 +2238,6 @@ struct TABLE_LIST
                 OT_BASE_ONLY);
     belong_to_view= belong_to_view_arg;
     trg_event_map= trg_event_map_arg;
-    /* MDL is enough for read-only FK checks, we don't need the table */
-    if (prelocking_type == PRELOCK_FK && lock_type < TL_WRITE_ALLOW_WRITE)
-      open_strategy= OPEN_STUB;
 
     **last_ptr= this;
     prev_global= *last_ptr;
