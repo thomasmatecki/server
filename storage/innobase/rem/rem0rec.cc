@@ -2739,7 +2739,7 @@ wsrep_rec_get_foreign_key(
 					}
 					data++;
 				}
-		
+
 				if (!(col_f->prtype & DATA_UNSIGNED)) {
 					buf[len-1] = (byte) (buf[len-1] ^ 128);
 				}
@@ -2765,7 +2765,6 @@ wsrep_rec_get_foreign_key(
 			case DATA_GEOMETRY:
 				memcpy(buf, data, len);
 				break;
-
 			case DATA_FLOAT:
 			{
 				float f = mach_float_read(data);
@@ -2777,6 +2776,7 @@ wsrep_rec_get_foreign_key(
 				double d = mach_double_read(data);
 				memcpy(buf, &d, sizeof(double));
 			}
+			break;
 			break;
 			default:
 				break;
