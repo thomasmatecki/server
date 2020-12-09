@@ -161,6 +161,11 @@ trx_init(
 	trx->lock.rec_cached = 0;
 
 	trx->lock.table_cached = 0;
+#ifdef WITH_WSREP
+	ut_ad(!trx->wsrep);
+	ut_ad(!trx->wsrep_event);
+	ut_ad(!trx->wsrep_UK_scan);
+#endif /* WITH_WSREP */
 
 	ut_ad(trx->get_flush_observer() == NULL);
 }
@@ -475,6 +480,7 @@ void trx_t::free()
   MEM_NOACCESS(&flush_observer, sizeof flush_observer);
 #ifdef WITH_WSREP
   MEM_NOACCESS(&wsrep_event, sizeof wsrep_event);
+  MEM_NOACCESS(&wsrep_UK_scan, sizeof wsrep_UK_scan);
 #endif /* WITH_WSREP */
   MEM_NOACCESS(&magic_n, sizeof magic_n);
   trx_pools->mem_free(this);

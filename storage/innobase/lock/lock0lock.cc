@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2014, 2020, MariaDB Corporation.
+Copyright (c) 2014, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -806,8 +806,18 @@ lock_rec_has_to_wait(
 
 		return false;
 	}
-
 #ifdef WITH_WSREP
+	/* New lock request from a transaction is using unique key
+	scan and this transaction is a wsrep high priority transaction
+	(brute force). If conflicting transaction is also wsrep high
+	priority transaction we should avoid lock conflict because
+	ordering of these transactions is already decided and
+	conflicting transaction will be later replayed. */
+	if (trx->is_wsrep_UK_scan()
+	    && wsrep_thd_is_BF(lock2->trx->mysql_thd, true)) {
+		return false;
+	}
+
 	/* There should not be two conflicting locks that are
 	brute force. If there is it is a bug. */
 	wsrep_assert_no_bf_bf_wait(NULL, lock2, trx);
@@ -5654,8 +5664,23 @@ lock_sec_rec_modify_check_and_lock(
 	index record, and this would not have been possible if another active
 	transaction had modified this secondary index record. */
 
+#ifdef WITH_WSREP
+	trx_t *trx= thr_get_trx(thr);
+	/* If transaction scanning an unique secondary key is wsrep
+	high priority thread (brute force) this scanning may involve
+	GAP-locking in the index. As this locking happens also when
+	applying replication events in high priority applier threads,
+	there is a probability for lock conflicts between two wsrep
+	high priority threads. To avoid this GAP-locking we mark that
+	this transaction is using unique key scan here. */
+	if (trx->is_wsrep() && wsrep_thd_is_BF(trx->mysql_thd, false))
+		trx->wsrep_UK_scan= true;
+#endif /* WITH_WSREP */
 	err = lock_rec_lock(TRUE, LOCK_X | LOCK_REC_NOT_GAP,
 			    block, heap_no, index, thr);
+#ifdef WITH_WSREP
+	trx->wsrep_UK_scan= false;
+#endif /* WITH_WSREP */
 
 #ifdef UNIV_DEBUG
 	{
@@ -5748,9 +5773,23 @@ lock_sec_rec_read_check_and_lock(
 		return DB_SUCCESS;
 	}
 
+#ifdef WITH_WSREP
+	trx_t *trx= thr_get_trx(thr);
+	/* If transaction scanning an unique secondary key is wsrep
+	high priority thread (brute force) this scanning may involve
+	GAP-locking in the index. As this locking happens also when
+	applying replication events in high priority applier threads,
+	there is a probability for lock conflicts between two wsrep
+	high priority threads. To avoid this GAP-locking we mark that
+	this transaction is using unique key scan here. */
+	if (trx->is_wsrep() && wsrep_thd_is_BF(trx->mysql_thd, false))
+		trx->wsrep_UK_scan= true;
+#endif /* WITH_WSREP */
 	err = lock_rec_lock(FALSE, ulint(mode) | gap_mode,
 			    block, heap_no, index, thr);
-
+#ifdef WITH_WSREP
+	trx->wsrep_UK_scan= false;
+#endif /* WITH_WSREP */
 	ut_ad(lock_rec_queue_validate(FALSE, block, rec, index, offsets));
 
 	return(err);
