@@ -2996,7 +2996,6 @@ void st_select_lex::init_select()
   type= 0;
   db= null_clex_str;
   having= 0;
-  table_join_options= 0;
   in_sum_expr= with_wild= 0;
   options= 0;
   ftfunc_list_alloc.empty();
@@ -3496,12 +3495,6 @@ List<Item>* st_select_lex::get_item_list()
   return &item_list;
 }
 
-ulong st_select_lex::get_table_join_options()
-{
-  return table_join_options;
-}
-
-
 bool st_select_lex::setup_ref_array(THD *thd, uint order_group_num)
 {
 
@@ -3747,13 +3740,34 @@ void st_select_lex::print_limit(THD *thd,
   if (limit_params.explicit_limit &&
       limit_params.select_limit)
   {
-    str->append(STRING_WITH_LEN(" limit "));
-    if (limit_params.offset_limit)
+    /*
+      [OFFSET n]
+      FETCH FIRST n ROWS WITH TIES
+
+      For FETCH FIRST n ROWS ONLY we fall back to the "limit" specification
+      as it's identical.
+    */
+    if (limit_params.with_ties)
     {
-      limit_params.offset_limit->print(str, query_type);
-      str->append(',');
+      if (limit_params.offset_limit)
+      {
+        str->append(STRING_WITH_LEN(" offset "));
+        limit_params.offset_limit->print(str, query_type);
+      }
+      str->append(STRING_WITH_LEN(" fetch first "));
+      limit_params.select_limit->print(str, query_type);
+      str->append(STRING_WITH_LEN(" rows with ties"));
     }
-    limit_params.select_limit->print(str, query_type);
+    else
+    {
+      str->append(STRING_WITH_LEN(" limit "));
+      if (limit_params.offset_limit)
+      {
+        limit_params.offset_limit->print(str, query_type);
+        str->append(',');
+      }
+      limit_params.select_limit->print(str, query_type);
+    }
   }
 }
 
@@ -4160,7 +4174,7 @@ void st_select_lex_unit::set_limit(st_select_lex *sl)
 {
   DBUG_ASSERT(!thd->stmt_arena->is_stmt_prepare());
 
-  lim.set_limit(sl->get_limit(), sl->get_offset());
+  lim.set_limit(sl->get_limit(), sl->get_offset(), sl->limit_params.with_ties);
 }
 
 

@@ -11713,10 +11713,8 @@ table_primary_ident:
           table_ident opt_use_partition opt_for_system_time_clause
           opt_table_alias_clause opt_key_definition
           {
-            SELECT_LEX *sel= Select;
-            sel->table_join_options= 0;
             if (!($$= Select->add_table_to_list(thd, $1, $4,
-                                                Select->get_table_join_options(),
+                                                0,
                                                 YYPS->m_lock_type,
                                                 YYPS->m_mdl_type,
                                                 Select->pop_index_hints(),
@@ -12240,7 +12238,39 @@ limit_clause:
         ;
 
 fetch_first_clause:
-          FETCH_SYM first_or_next limit_option row_or_rows only_or_with_ties
+          FETCH_SYM first_or_next row_or_rows only_or_with_ties
+          {
+            Item *one= new (thd->mem_root) Item_int(thd, (int32) 1);
+            if (unlikely(one == NULL))
+              MYSQL_YYABORT;
+            $$.select_limit= one;
+            $$.offset_limit= 0;
+            $$.explicit_limit= true;
+            $$.with_ties= $4;
+          }
+        | OFFSET_SYM limit_option
+          FETCH_SYM first_or_next row_or_rows only_or_with_ties
+          {
+            Item *one= new (thd->mem_root) Item_int(thd, (int32) 1);
+            if (unlikely(one == NULL))
+              MYSQL_YYABORT;
+            $$.select_limit= one;
+            $$.offset_limit= $2;
+            $$.explicit_limit= true;
+            $$.with_ties= $6;
+          }
+        | FETCH_SYM first_or_next row_or_rows only_or_with_ties
+          OFFSET_SYM limit_option
+          {
+            Item *one= new (thd->mem_root) Item_int(thd, (int32) 1);
+            if (unlikely(one == NULL))
+              MYSQL_YYABORT;
+            $$.select_limit= one;
+            $$.offset_limit= $6;
+            $$.explicit_limit= true;
+            $$.with_ties= $4;
+          }
+        | FETCH_SYM first_or_next limit_option row_or_rows only_or_with_ties
           {
             $$.select_limit= $3;
             $$.offset_limit= 0;
@@ -13145,10 +13175,8 @@ update_table_list:
           table_ident opt_use_partition for_portion_of_time_clause
           opt_table_alias_clause opt_key_definition
           {
-            SELECT_LEX *sel= Select;
-            sel->table_join_options= 0;
             if (!($$= Select->add_table_to_list(thd, $1, $4,
-                                                Select->get_table_join_options(),
+                                                0,
                                                 YYPS->m_lock_type,
                                                 YYPS->m_mdl_type,
                                                 Select->pop_index_hints(),
