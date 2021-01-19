@@ -2746,12 +2746,14 @@ int JOIN::optimize_stage2()
   /*
      Remove ORDER BY if GROUP BY is more specific. Example
      GROUP BY a, b ORDER BY a
+     This can not be done if FETCH .. WITH TIES is used as a limit clause.
 
      Alternatively remove ORDER BY if there are aggregate functions and no
      GROUP BY, this always leads to one row result, no point in sorting.
   */
-  if (test_if_subpart(group_list, order) ||
-      (!group_list && tmp_table_param.sum_func_count))
+  if ((!select_lex->limit_params.with_ties
+        && test_if_subpart(group_list, order))
+      || (!group_list && tmp_table_param.sum_func_count))
   {
     order=0;
     if (is_indexed_agg_distinct(this, NULL))

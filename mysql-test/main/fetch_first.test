@@ -576,11 +576,34 @@ show create view v3;
 --echo #
 --echo # Test joins with views and order by referenced from the view.
 --echo #
+
+--sorted_result
 select *
 from t1 inner join v1 on t1.id = v1.fk
 order by v1.location desc, t1.first_name
 offset 1
 fetch first 1 rows with ties;
+
+select first_name, last_name, sum(score)
+from t1
+group by first_name, last_name
+order by first_name;
+
+--echo #
+--echo # Test with ties with group by. Make sure that if order by is a less
+--echo # specific sort of group by, that WITH TIES still gets executed.
+--echo #
+select first_name, last_name, sum(score)
+from t1
+group by first_name, last_name
+order by first_name
+offset 1
+fetch first 2 rows with ties;
+
+--echo #
+--echo # Test with ties when an index is used to provide the order by.
+--echo #
+
 
 drop table t1;
 drop table t2;
