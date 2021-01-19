@@ -763,6 +763,35 @@ fetch first 1 rows with ties;
 id	first_name	last_name	score	id	location	fk
 5	John	Smith	7	5	L4	5
 6	John	Elton	8.1	6	L4	6
+select first_name, last_name, sum(score)
+from t1
+group by first_name, last_name
+order by first_name;
+first_name	last_name	sum(score)
+Alice	Fowler	5
+Bob	Trasc	9
+John	Doe	6
+John	Elton	8.1
+John	Smith	19
+Silvia	Ganush	10
+#
+# Test with ties with group by. Make sure that if order by is a less
+# specific sort of group by, that WITH TIES still gets executed.
+#
+select first_name, last_name, sum(score)
+from t1
+group by first_name, last_name
+order by first_name
+offset 1
+fetch first 2 rows with ties;
+first_name	last_name	sum(score)
+Bob	Trasc	9
+John	Elton	8.1
+John	Smith	19
+John	Doe	6
+#
+# Test with ties when an index is used to provide the order by.
+#
 drop table t1;
 drop table t2;
 drop view v1;
