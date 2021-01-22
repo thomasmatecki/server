@@ -24,15 +24,6 @@ The InnoDB parser is frozen because MySQL takes care of SQL parsing.
 Therefore we normally keep the InnoDB parser C files as they are, and do
 not automatically generate them from pars0grm.y and pars0lex.l.
 
-How to make the InnoDB parser and lexer C files:
-
-1. Run ./make_flex.sh to generate lexer files.
-
-2. Run ./make_bison.sh to generate parser files.
-
-These instructions seem to work at least with bison-1.875d and flex-2.5.31 on
-Linux.
-
 Created 12/14/1997 Heikki Tuuri
 *******************************************************/
 
@@ -49,13 +40,14 @@ Created 12/14/1997 Heikki Tuuri
 %option noyy_scan_bytes
 %option noyy_scan_string
 %option nounistd
+%option prefix="innodb_yy"
 
 %{
 #define YYSTYPE que_node_t*
 
 #include "univ.i"
 #include "pars0pars.h"
-#include "pars0grm.h"
+#include "pars0grm.hh"
 #include "pars0sym.h"
 #include "mem0mem.h"
 #include "os0proc.h"
@@ -112,7 +104,7 @@ BOUND_ID	\$[a-z_A-Z0-9]+
 %%
 
 {DIGIT}+	{
-			yylval = sym_tab_add_int_lit(pars_sym_tab_global,
+			innodb_yylval = sym_tab_add_int_lit(pars_sym_tab_global,
 								atoi(yytext));
 			return(PARS_INT_LIT);
 }
@@ -126,14 +118,14 @@ BOUND_ID	\$[a-z_A-Z0-9]+
 {BOUND_LIT}	{
 			ulint	type;
 
-			yylval = sym_tab_add_bound_lit(pars_sym_tab_global,
+			innodb_yylval = sym_tab_add_bound_lit(pars_sym_tab_global,
 				yytext + 1, &type);
 
 			return((int) type);
 }
 
 {BOUND_ID}	{
-			yylval = sym_tab_add_bound_id(pars_sym_tab_global,
+			innodb_yylval = sym_tab_add_bound_id(pars_sym_tab_global,
 				yytext + 1);
 
 			return(PARS_ID_TOKEN);
@@ -170,7 +162,7 @@ In the state 'quoted', only two actions are possible (defined below). */
 
 			if (yyleng % 2) {
 				BEGIN(INITIAL);
-				yylval = sym_tab_add_str_lit(
+				innodb_yylval = sym_tab_add_str_lit(
 					pars_sym_tab_global,
 					(byte*) stringbuf, stringbuf_len);
 				return(PARS_STR_LIT);
@@ -208,7 +200,7 @@ In the state 'id', only two actions are possible (defined below). */
 
 			if (yyleng % 2) {
 				BEGIN(INITIAL);
-				yylval = sym_tab_add_id(
+				innodb_yylval = sym_tab_add_id(
 					pars_sym_tab_global,
 					(byte*) stringbuf, stringbuf_len);
 
@@ -217,14 +209,14 @@ In the state 'id', only two actions are possible (defined below). */
 }
 
 "NULL"		{
-			yylval = sym_tab_add_null_lit(pars_sym_tab_global);
+			innodb_yylval = sym_tab_add_null_lit(pars_sym_tab_global);
 
 			return(PARS_NULL_LIT);
 }
 
 "SQL"		{
 			/* Implicit cursor name */
-			yylval = sym_tab_add_str_lit(pars_sym_tab_global,
+			innodb_yylval = sym_tab_add_str_lit(pars_sym_tab_global,
 							(byte*) yytext, yyleng);
 			return(PARS_SQL_TOKEN);
 }
@@ -474,14 +466,14 @@ In the state 'id', only two actions are possible (defined below). */
 }
 
 {ID}		{
-			yylval = sym_tab_add_id(pars_sym_tab_global,
+			innodb_yylval = sym_tab_add_id(pars_sym_tab_global,
 							(byte*) yytext,
 							strlen(yytext));
 			return(PARS_ID_TOKEN);
 }
 
 {TABLE_NAME}	{
-			yylval = sym_tab_add_id(pars_sym_tab_global,
+			innodb_yylval = sym_tab_add_id(pars_sym_tab_global,
 							(byte*) yytext,
 							strlen(yytext));
 			return(PARS_TABLE_NAME_TOKEN);

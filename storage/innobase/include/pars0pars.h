@@ -96,7 +96,7 @@ pars_get_lex_chars(
 /*************************************************************//**
 Called by yyparse on error. */
 void
-yyerror(
+innodb_yyerror(
 /*====*/
 	const char*	s);	/*!< in: error message string */
 /*********************************************************************//**
@@ -614,7 +614,7 @@ struct pars_bound_id_t {
 /** Struct used to denote a reserved word in a parsing tree */
 struct pars_res_word_t{
 	int	code;	/*!< the token code for the reserved word from
-			pars0grm.h */
+			pars0grm.hh */
 };
 
 /** A predefined function or operator node in a parsing tree; this construct

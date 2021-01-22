@@ -35,7 +35,7 @@ on 1/27/1998 */
 #include "dict0mem.h"
 #include "dict0crea.h"
 #include "que0que.h"
-#include "pars0grm.h"
+#include "pars0grm.hh"
 #include "pars0opt.h"
 #include "data0data.h"
 #include "data0type.h"
@@ -1968,7 +1968,7 @@ pars_get_lex_chars(
 /*************************************************************//**
 Called by yyparse on error. */
 void
-yyerror(
+innodb_yyerror(
 /*====*/
 	const char*	s MY_ATTRIBUTE((unused)))
 				/*!< in: error message string */
@@ -2004,7 +2004,7 @@ pars_sql(
 	pars_sym_tab_global->next_char_pos = 0;
 	pars_sym_tab_global->info = info;
 
-	if (yyparse()) {
+	if (innodb_yyparse()) {
 #ifdef UNIV_DEBUG
 		if (info->fatal_syntax_err) {
 #endif /* UNIV_DEBUG */

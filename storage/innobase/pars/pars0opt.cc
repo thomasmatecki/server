@@ -32,7 +32,7 @@ Created 12/21/1997 Heikki Tuuri
 #include "dict0dict.h"
 #include "dict0mem.h"
 #include "que0que.h"
-#include "pars0grm.h"
+#include "pars0grm.hh"
 #include "pars0pars.h"
 
 #define OPT_EQUAL	1	/* comparison by = */

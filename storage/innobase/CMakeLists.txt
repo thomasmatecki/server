@@ -19,7 +19,7 @@
 
 
 INCLUDE(innodb.cmake)
-INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/tpool)
+INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/tpool ${CMAKE_CURRENT_BINARY_DIR}/pars)
 
 SET(INNOBASE_SOURCES
 	btr/btr0btr.cc
@@ -199,7 +199,6 @@ SET(INNOBASE_SOURCES
 	include/page0types.h
 	include/page0zip.h
 	include/page0zip.ic
-	include/pars0grm.h
 	include/pars0opt.h
 	include/pars0pars.h
 	include/pars0sym.h
@@ -302,8 +301,9 @@ SET(INNOBASE_SOURCES
 	page/page0cur.cc
 	page/page0page.cc
 	page/page0zip.cc
-	pars/lexyy.cc
-	pars/pars0grm.cc
+	${CMAKE_CURRENT_BINARY_DIR}/pars/pars0lex.cc
+	${CMAKE_CURRENT_BINARY_DIR}/pars/pars0grm.cc
+	${CMAKE_CURRENT_BINARY_DIR}/pars/pars0grm.hh
 	pars/pars0opt.cc
 	pars/pars0pars.cc
 	pars/pars0sym.cc
@@ -402,3 +402,11 @@ IF(NOT (PLUGIN_INNOBASE STREQUAL DYNAMIC))
   TARGET_LINK_LIBRARIES(innobase tpool mysys)
   ADD_SUBDIRECTORY(${CMAKE_SOURCE_DIR}/extra/mariabackup ${CMAKE_BINARY_DIR}/extra/mariabackup)
 ENDIF()
+
+FIND_PACKAGE(BISON REQUIRED 2.0)
+BISON_TARGET(gen_pars0grm ${CMAKE_CURRENT_SOURCE_DIR}/pars/pars0grm.y ${CMAKE_CURRENT_BINARY_DIR}/pars/pars0grm.cc
+             COMPILE_FLAGS "-p innodb_yy")
+
+FIND_PACKAGE(FLEX REQUIRED 2.5.39)
+FLEX_TARGET(gen_pars0lex ${CMAKE_CURRENT_SOURCE_DIR}/pars/pars0lex.l ${CMAKE_CURRENT_BINARY_DIR}/pars/pars0lex.cc)
+ADD_FLEX_BISON_DEPENDENCY(gen_pars0lex gen_pars0grm)

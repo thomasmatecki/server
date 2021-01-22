@@ -27,7 +27,7 @@ Created 12/15/1997 Heikki Tuuri
 #include "mem0mem.h"
 #include "data0type.h"
 #include "data0data.h"
-#include "pars0grm.h"
+#include "pars0grm.hh"
 #include "pars0pars.h"
 #include "que0que.h"
 #include "eval0eval.h"
