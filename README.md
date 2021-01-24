@@ -42,7 +42,8 @@ Help:
 
 More help is available from the Maria Discuss mailing list
 https://launchpad.net/~maria-discuss
-and the #maria IRC channel on Freenode.
+and the #maria IRC channel on Freenode as well as the MariaDB Zulip Channel:
+https://mariadb.zulipchat.com/
 
 
 Licensing:
