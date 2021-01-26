@@ -301,7 +301,8 @@ SET(INNOBASE_SOURCES
 	page/page0cur.cc
 	page/page0page.cc
 	page/page0zip.cc
-	${CMAKE_CURRENT_BINARY_DIR}/pars/pars0lex.cc
+	pars/lexyy.cc
+	# ${CMAKE_CURRENT_BINARY_DIR}/pars/pars0lex.cc
 	${CMAKE_CURRENT_BINARY_DIR}/pars/pars0grm.cc
 	${CMAKE_CURRENT_BINARY_DIR}/pars/pars0grm.hh
 	pars/pars0opt.cc
@@ -407,6 +408,6 @@ FIND_PACKAGE(BISON REQUIRED 2.0)
 BISON_TARGET(gen_pars0grm ${CMAKE_CURRENT_SOURCE_DIR}/pars/pars0grm.y ${CMAKE_CURRENT_BINARY_DIR}/pars/pars0grm.cc
              COMPILE_FLAGS "-p innodb_yy")
 
-FIND_PACKAGE(FLEX REQUIRED 2.5.39)
-FLEX_TARGET(gen_pars0lex ${CMAKE_CURRENT_SOURCE_DIR}/pars/pars0lex.l ${CMAKE_CURRENT_BINARY_DIR}/pars/pars0lex.cc)
-ADD_FLEX_BISON_DEPENDENCY(gen_pars0lex gen_pars0grm)
+# FIND_PACKAGE(FLEX REQUIRED 2.5.39)
+# FLEX_TARGET(gen_pars0lex ${CMAKE_CURRENT_SOURCE_DIR}/pars/pars0lex.l ${CMAKE_CURRENT_BINARY_DIR}/pars/pars0lex.cc)
+# ADD_FLEX_BISON_DEPENDENCY(gen_pars0lex gen_pars0grm)
