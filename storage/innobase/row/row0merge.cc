@@ -309,7 +309,8 @@ row_merge_buf_encode(
 	ulint	extra_size;
 
 	size = rec_get_converted_size_temp(
-		index, entry->fields, n_fields, &extra_size);
+		index, entry->fields, n_fields, index->n_core_fields,
+		&extra_size);
 	ut_ad(size >= extra_size);
 
 	/* Encode extra_size + 1 */
@@ -322,7 +323,8 @@ row_merge_buf_encode(
 	}
 
 	rec_convert_dtuple_to_temp(*b + extra_size, index,
-				   entry->fields, n_fields);
+				   entry->fields, n_fields,
+				   index->n_core_fields);
 
 	*b += size;
 }
@@ -797,7 +799,8 @@ row_merge_buf_add(
 		ulint	extra;
 
 		size = rec_get_converted_size_temp(
-			index, entry->fields, n_fields, &extra);
+			index, entry->fields, n_fields, index->n_core_fields,
+			&extra);
 
 		ut_ad(data_size + extra_size == size);
 		ut_ad(extra_size == extra);

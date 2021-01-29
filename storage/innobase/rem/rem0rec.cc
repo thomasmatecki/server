@@ -1055,6 +1055,7 @@ rec_get_converted_size_comp_prefix_low(
 					it does not */
 	const dfield_t*		fields,	/*!< in: array of data fields */
 	ulint			n_fields,/*!< in: number of data fields */
+	ulint			n_core_fields,/*!< in: number of core data field */
 	ulint*			extra,	/*!< out: extra size */
 	rec_comp_status_t	status,	/*!< in: status flags */
 	bool			temp)	/*!< in: whether this is a
@@ -1070,14 +1071,13 @@ rec_get_converted_size_comp_prefix_low(
 	      || status == REC_STATUS_COLUMNS_ADDED);
 
 	if (status == REC_STATUS_COLUMNS_ADDED
-	    && (!temp || n_fields > index->n_core_fields)) {
-		ut_ad(index->is_instant());
+	    && (!temp || n_fields > n_core_fields)) {
+		ut_ad(index->is_instant() || index->n_core_fields > n_core_fields);
 		ut_ad(UT_BITS_IN_BYTES(n_null) >= index->n_core_null_bytes);
 		extra_size += UT_BITS_IN_BYTES(index->get_n_nullable(n_fields))
-			+ rec_get_n_add_field_len(n_fields - 1
-						  - index->n_core_fields);
+			+ rec_get_n_add_field_len(n_fields - 1 - n_core_fields);
 	} else {
-		ut_ad(n_fields <= index->n_core_fields);
+		ut_ad(n_fields <= n_core_fields);
 		extra_size += index->n_core_null_bytes;
 	}
 
@@ -1193,8 +1193,8 @@ rec_get_converted_size_comp_prefix(
 {
 	ut_ad(dict_table_is_comp(index->table));
 	return(rec_get_converted_size_comp_prefix_low(
-		       index, fields, n_fields, extra,
-		       REC_STATUS_ORDINARY, false));
+		       index, fields, n_fields, index->n_core_fields,
+		       extra, REC_STATUS_ORDINARY, false));
 }
 
 /**********************************************************//**
@@ -1225,7 +1225,8 @@ rec_get_converted_size_comp(
 		ut_ad(n_fields >= index->n_core_fields);
 		ut_ad(n_fields <= index->n_fields);
 		return rec_get_converted_size_comp_prefix_low(
-			index, fields, n_fields, extra, status, false);
+			index, fields, n_fields, index->n_core_fields,
+			extra, status, false);
 	case REC_STATUS_NODE_PTR:
 		n_fields--;
 		ut_ad(n_fields == dict_index_get_n_unique_in_tree_nonleaf(
@@ -1233,7 +1234,8 @@ rec_get_converted_size_comp(
 		ut_ad(dfield_get_len(&fields[n_fields]) == REC_NODE_PTR_SIZE);
 		return REC_NODE_PTR_SIZE /* child page number */
 			+ rec_get_converted_size_comp_prefix_low(
-				index, fields, n_fields, extra, status, false);
+				index, fields, n_fields, index->n_core_fields,
+				extra, status, false);
 	case REC_STATUS_INFIMUM:
 	case REC_STATUS_SUPREMUM:
 		/* not supported */
@@ -1415,6 +1417,7 @@ rec_convert_dtuple_to_rec_old(
 @param[in]	index		index
 @param[in]	fields		data fields to convert
 @param[in]	n_fields	number of data fields
+@param[in]	n_core_fields	number of core fields to exist in record
 @param[in]	status		rec_get_status(rec)
 @param[in]	temp		whether to use the format for temporary files
 				in index creation */
@@ -1425,6 +1428,7 @@ rec_convert_dtuple_to_rec_comp(
 	const dict_index_t*	index,
 	const dfield_t*		fields,
 	ulint			n_fields,
+	ulint			n_core_fields,
 	rec_comp_status_t	status,
 	bool			temp)
 {
@@ -1448,16 +1452,15 @@ rec_convert_dtuple_to_rec_comp(
 
 	switch (status) {
 	case REC_STATUS_COLUMNS_ADDED:
-		ut_ad(index->is_instant());
-		ut_ad(n_fields > index->n_core_fields);
-		rec_set_n_add_field(nulls, n_fields - 1
-				    - index->n_core_fields);
+		ut_ad(index->is_instant() || index->n_core_fields > n_core_fields);
+		ut_ad(n_fields > n_core_fields);
+		rec_set_n_add_field(nulls, n_fields - 1 - n_core_fields);
 		/* fall through */
 	case REC_STATUS_ORDINARY:
 		ut_ad(n_fields <= dict_index_get_n_fields(index));
 		if (!temp) {
 			rec_set_heap_no_new(rec, PAGE_HEAP_NO_USER_LOW);
-			rec_set_status(rec, n_fields == index->n_core_fields
+			rec_set_status(rec, n_fields == n_core_fields
 				       ? REC_STATUS_ORDINARY
 				       : REC_STATUS_COLUMNS_ADDED);
 		} if (dict_table_is_comp(index->table)) {
@@ -1612,11 +1615,13 @@ rec_convert_dtuple_to_rec_new(
 	ulint	extra_size;
 
 	rec_get_converted_size_comp(
-		index, status, dtuple->fields, dtuple->n_fields, &extra_size);
+		index, status, dtuple->fields, dtuple->n_fields,
+		&extra_size);
 	rec_t* rec = buf + extra_size;
 
 	rec_convert_dtuple_to_rec_comp(
-		rec, index, dtuple->fields, dtuple->n_fields, status, false);
+		rec, index, dtuple->fields, dtuple->n_fields, index->n_core_fields,
+		status, false);
 	rec_set_info_bits_new(rec, dtuple->info_bits & ~REC_NEW_STATUS_MASK);
 	return(rec);
 }
@@ -1656,6 +1661,8 @@ rec_convert_dtuple_to_rec(
 @param[in]	index		clustered or secondary index
 @param[in]	fields		data fields
 @param[in]	n_fields	number of data fields
+@param[in]	n_core_fields	number of core data fields
+				to exist in temporary file record
 @param[out]	extra		record header size
 @param[in]	status		REC_STATUS_ORDINARY or REC_STATUS_COLUMNS_ADDED
 @return	total size, in bytes */
@@ -1664,11 +1671,12 @@ rec_get_converted_size_temp(
 	const dict_index_t*	index,
 	const dfield_t*		fields,
 	ulint			n_fields,
+	ulint			n_core_fields,
 	ulint*			extra,
 	rec_comp_status_t	status)
 {
 	return rec_get_converted_size_comp_prefix_low(
-		index, fields, n_fields, extra, status, true);
+		index, fields, n_fields, n_core_fields, extra, status, true);
 }
 
 /** Determine the offset to each field in temporary file.
@@ -1721,6 +1729,8 @@ rec_init_offsets_temp(
 @param[in]	index		clustered or secondary index
 @param[in]	fields		data fields
 @param[in]	n_fields	number of data fields
+@param[in]	n_core_fields	number of core data field to exist in
+				temporary file record
 @param[in]	status		REC_STATUS_ORDINARY or REC_STATUS_COLUMNS_ADDED
 */
 void
@@ -1729,10 +1739,11 @@ rec_convert_dtuple_to_temp(
 	const dict_index_t*	index,
 	const dfield_t*		fields,
 	ulint			n_fields,
+	ulint			n_core_fields,
 	rec_comp_status_t	status)
 {
 	rec_convert_dtuple_to_rec_comp(rec, index, fields, n_fields,
-				       status, true);
+				       n_core_fields, status, true);
 }
 
 /** Copy the first n fields of a (copy of a) physical record to a data tuple.

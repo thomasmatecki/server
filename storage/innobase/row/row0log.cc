@@ -346,13 +346,15 @@ row_log_online_op(
 	}
 
 	ut_ad(dict_index_is_online_ddl(index));
+	log = index->online_log;
 
 	/* Compute the size of the record. This differs from
 	row_merge_buf_encode(), because here we do not encode
 	extra_size+1 (and reserve 0 as the end-of-chunk marker). */
 
 	size = rec_get_converted_size_temp(
-		index, tuple->fields, tuple->n_fields, &extra_size);
+		index, tuple->fields, tuple->n_fields, log->n_core_fields,
+		&extra_size);
 	ut_ad(size >= extra_size);
 	ut_ad(size <= sizeof log->tail.buf);
 
@@ -360,7 +362,6 @@ row_log_online_op(
 		+ (extra_size >= 0x80) + size
 		+ (trx_id ? DATA_TRX_ID_LEN : 0);
 
-	log = index->online_log;
 	mutex_enter(&log->mutex);
 
 	if (trx_id > log->max_trx) {
@@ -400,7 +401,8 @@ row_log_online_op(
 	}
 
 	rec_convert_dtuple_to_temp(
-		b + extra_size, index, tuple->fields, tuple->n_fields);
+		b + extra_size, index, tuple->fields, tuple->n_fields,
+		log->n_core_fields);
 	b += size;
 
 	if (mrec_size >= avail_size) {
@@ -743,7 +745,7 @@ row_log_table_delete(
 		      old_pk, old_pk->n_fields - 1)->len);
 	old_pk_size = rec_get_converted_size_temp(
 		new_index, old_pk->fields, old_pk->n_fields,
-		&old_pk_extra_size);
+		index->online_log->n_core_fields, &old_pk_extra_size);
 	ut_ad(old_pk_extra_size < 0x100);
 
 	/* 2 = 1 (extra_size) + at least 1 byte payload */
@@ -756,7 +758,8 @@ row_log_table_delete(
 
 		rec_convert_dtuple_to_temp(
 			b + old_pk_extra_size, new_index,
-			old_pk->fields, old_pk->n_fields);
+			old_pk->fields, old_pk->n_fields,
+			index->online_log->n_core_fields);
 
 		b += old_pk_size;
 
@@ -855,7 +858,8 @@ row_log_table_low_redundant(
 		? REC_STATUS_COLUMNS_ADDED : REC_STATUS_ORDINARY;
 
 	size = rec_get_converted_size_temp(
-		index, tuple->fields, tuple->n_fields, &extra_size, status);
+		index, tuple->fields, tuple->n_fields,
+		index->online_log->n_core_fields, &extra_size, status);
 	if (is_instant) {
 		size++;
 		extra_size++;
@@ -876,7 +880,7 @@ row_log_table_low_redundant(
 
 		old_pk_size = rec_get_converted_size_temp(
 			new_index, old_pk->fields, old_pk->n_fields,
-			&old_pk_extra_size);
+			index->online_log->n_core_fields, &old_pk_extra_size);
 		ut_ad(old_pk_extra_size < 0x100);
 		mrec_size += 1/*old_pk_extra_size*/ + old_pk_size;
 	}
@@ -893,7 +897,8 @@ row_log_table_low_redundant(
 
 				rec_convert_dtuple_to_temp(
 					b + old_pk_extra_size, new_index,
-					old_pk->fields, old_pk->n_fields);
+					old_pk->fields, old_pk->n_fields,
+					index->online_log->n_core_fields);
 				b += old_pk_size;
 			}
 		}
@@ -916,7 +921,7 @@ row_log_table_low_redundant(
 
 		rec_convert_dtuple_to_temp(
 			b + extra_size, index, tuple->fields, tuple->n_fields,
-			status);
+			index->online_log->n_core_fields, status);
 		b += size;
 
 		row_log_table_close(index, b, mrec_size, avail_size);
@@ -1038,7 +1043,7 @@ row_log_table_low(
 
 		old_pk_size = rec_get_converted_size_temp(
 			new_index, old_pk->fields, old_pk->n_fields,
-			&old_pk_extra_size);
+			log->n_core_fields, &old_pk_extra_size);
 		ut_ad(old_pk_extra_size < 0x100);
 		mrec_size += 1/*old_pk_extra_size*/ + old_pk_size;
 	}
@@ -1054,7 +1059,8 @@ row_log_table_low(
 
 				rec_convert_dtuple_to_temp(
 					b + old_pk_extra_size, new_index,
-					old_pk->fields, old_pk->n_fields);
+					old_pk->fields, old_pk->n_fields,
+					log->n_core_fields);
 				b += old_pk_size;
 			}
 		}

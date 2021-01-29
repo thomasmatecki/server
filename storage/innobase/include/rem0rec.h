@@ -979,6 +979,8 @@ rec_copy(
 @param[in]	index		clustered or secondary index
 @param[in]	fields		data fields
 @param[in]	n_fields	number of data fields
+@param[in]	n_core_fields	number of core data fields to
+				exist in temporary file record
 @param[out]	extra		record header size
 @param[in]	status		REC_STATUS_ORDINARY or REC_STATUS_COLUMNS_ADDED
 @return	total size, in bytes */
@@ -987,6 +989,7 @@ rec_get_converted_size_temp(
 	const dict_index_t*	index,
 	const dfield_t*		fields,
 	ulint			n_fields,
+	ulint			n_core_fields,
 	ulint*			extra,
 	rec_comp_status_t	status = REC_STATUS_ORDINARY)
 	MY_ATTRIBUTE((warn_unused_result, nonnull));
@@ -1024,6 +1027,8 @@ rec_init_offsets_temp(
 @param[in]	index		clustered or secondary index
 @param[in]	fields		data fields
 @param[in]	n_fields	number of data fields
+@param[in]	n_core_fields	number of core data fields to exist in
+				temporary file record
 @param[in]	status		REC_STATUS_ORDINARY or REC_STATUS_COLUMNS_ADDED
 */
 void
@@ -1032,6 +1037,7 @@ rec_convert_dtuple_to_temp(
 	const dict_index_t*	index,
 	const dfield_t*		fields,
 	ulint			n_fields,
+	ulint			n_core_fields,
 	rec_comp_status_t	status = REC_STATUS_ORDINARY)
 	MY_ATTRIBUTE((nonnull));
 
