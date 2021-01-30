@@ -98,7 +98,7 @@ drop table t1;
 # Incorrect types
 #
 create table t1 (id int not null primary key, f1 int, f2 int, key(f1)) engine=innodb;
---error ER_CANT_CREATE_TABLE
+--error ER_WRONG_FK_DEF
 create table t2(a char(20), key(a), foreign key(a) references t1(f1)) engine=innodb;
 show warnings;
 drop table t1;

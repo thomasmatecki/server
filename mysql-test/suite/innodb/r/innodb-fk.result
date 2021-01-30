@@ -52,6 +52,7 @@ CONSTRAINT fk3 FOREIGN KEY (f3) REFERENCES t3 (id) ON DELETE CASCADE
 ERROR 42S02: Table 'test.t3' doesn't exist
 show warnings;
 Level	Code	Message
+Error	1239	Incorrect foreign key definition for 't3'
 CREATE TABLE t2 (
 id int(11) NOT NULL AUTO_INCREMENT,
 f2 int(11) NOT NULL,
@@ -200,5 +201,5 @@ b int,
 c0123456789012345678 int,
 FOREIGN KEY (a012345678901234567,c0123456789012345678,b) REFERENCES tx (x1,x2,x3)
 ) ENGINE=InnoDB;
-ERROR HY000: Can't create table `test`.`t1` (errno: 150 "Foreign key constraint is incorrectly formed")
+ERROR 42000: Incorrect foreign key definition for 'x1'
 drop table tx;

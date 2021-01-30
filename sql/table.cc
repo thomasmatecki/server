@@ -10209,6 +10209,27 @@ Field *TABLE::find_field_by_name(LEX_CSTRING *str) const
 }
 
 
+Field *TABLE_SHARE::find_field_by_name(const LEX_CSTRING n) const
+{
+  Field **f;
+  if (name_hash.records)
+  {
+    f= (Field**) my_hash_search(&name_hash, (uchar *) n.str, n.length);
+    return f ? *f : NULL;
+  }
+  else
+  {
+    for (f= field; *f; f++)
+    {
+      if ((*f)->field_name.length == n.length &&
+          0 == cmp_ident((*f)->field_name, n))
+        return *f;
+    }
+  }
+  return NULL;
+}
+
+
 bool TABLE::export_structure(THD *thd, Row_definition_list *defs)
 {
   for (Field **src= field; *src; src++)

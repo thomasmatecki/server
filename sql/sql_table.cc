@@ -93,6 +93,10 @@ static
 bool fk_handle_drop(THD* thd, TABLE_LIST* table, FK_backup_storage& shares,
                     bool drop_db);
 
+static
+bool fk_prepare_create_table(THD *thd, Alter_info &alter_info, FK_list &foreign_keys);
+
+
 /**
   @brief Helper function for explain_filename
   @param thd          Thread handle
@@ -4656,6 +4660,9 @@ without_overlaps_err:
         DBUG_RETURN(TRUE);
     }
   }
+
+  /* Check foreign keys */
+  fk_prepare_create_table(thd, *alter_info, foreign_keys);
 
   /* Give warnings for not supported table options */
   extern handlerton *maria_hton;
@@ -12573,6 +12580,154 @@ bool TABLE_SHARE::fk_handle_create(THD *thd, FK_backup_storage &shares, FK_list 
   return false;
 }
 
+
+/** 1. Check referenced fields existence and type compatibility.
+
+    2. Fix foreign and referenced fields case. Fields must be fixed before FRM is
+    written and thus we need to acquire referenced shares now and then later in
+    fk_handle_c6reate() for refs X-locking (and update their FRMs). Note that
+    X-locking is done differently for ALTER so we'd better avoid it here.
+*/
+static
+bool fk_prepare_create_table(THD *thd, Alter_info &alter_info, FK_list &foreign_keys)
+{
+  List_iterator_fast<Create_field> cl_it(alter_info.create_list);
+  mbd::map<Table_name, Share_acquire, Table_name_lt> ref_shares;
+  const bool check_foreign= thd->variables.check_foreign();
+
+  /** Preacquire shares */
+  for (const FK_info &fk: foreign_keys)
+  {
+    if (fk.self_ref())
+      continue;
+    Table_name ref(fk.ref_db(), fk.referenced_table);
+    if (lower_case_table_names)
+      ref .lowercase(thd->mem_root);
+    if (ref_shares.find(ref) != ref_shares.end())
+      continue;
+    TABLE_LIST tl;
+    tl.init_one_table(&ref.db, &ref.name, NULL, TL_IGNORE);
+    Share_acquire sa(thd, tl);
+    if (!sa.share)
+    {
+      if (!check_foreign && thd->is_error() &&
+          thd->get_stmt_da()->sql_errno() == ER_NO_SUCH_TABLE)
+      {
+        // skip non-existing referenced shares, allow CREATE
+        thd->clear_error();
+        continue;
+      }
+      my_error(ER_WRONG_FK_DEF, MYF(0), ref.name.str);
+      return true;
+    }
+    if (!ref_shares.insert(ref, std::move(sa)))
+    {
+      my_error(ER_OUT_OF_RESOURCES, MYF(0));
+      return true;
+    }
+    DBUG_ASSERT(!sa.share);
+  }
+
+  for (FK_info &fk: foreign_keys)
+  {
+    DBUG_ASSERT(fk.foreign_fields.elements == fk.referenced_fields.elements);
+    List_iterator_fast<Lex_cstring> rf_it(fk.referenced_fields);
+    for (Lex_cstring &ff: fk.foreign_fields)
+    {
+      TABLE_SHARE *ref_share= NULL;
+      if (!fk.self_ref())
+      {
+        Table_name ref(fk.ref_db(), fk.referenced_table);
+        auto ref_it= ref_shares.find(ref);
+        if (!check_foreign && ref_it == ref_shares.end())
+          continue;
+        DBUG_ASSERT(ref_it != ref_shares.end());
+        ref_share= ref_it->second.share;
+        DBUG_ASSERT(ref_share);
+      }
+      Lex_cstring &rf= *(rf_it++);
+      Create_field *cf;
+      cl_it.rewind();
+      while ((cf= cl_it++))
+      {
+        if (0 == cmp_ident(cf->field_name, ff))
+          break;
+      }
+      if (!cf)
+      {
+        my_error(ER_WRONG_FK_DEF, MYF(0), ff.str);
+        return true;
+      }
+      // NB: two variants non-self-ref/self-ref, two types Field/Create_field
+      if (ref_share)
+      {
+        Field *ref_field= ref_share->find_field_by_name(rf);
+        if (!ref_field)
+        {
+          if (!check_foreign)
+            continue;
+          my_error(ER_WRONG_FK_DEF, MYF(0), rf.str);
+          return true;
+        }
+        // Do we really need cmp_type() and not result_type() here?
+        if (cf->cmp_type() != ref_field->cmp_type())
+        {
+          if (!check_foreign)
+            continue;
+          my_error(ER_WRONG_FK_DEF, MYF(0), ff.str);
+          return true;
+        }
+        /* NB: case may be different. Let's store correct case. */
+        if (rf.strdup(thd->mem_root, LEX_STRING_WITH_LEN(ref_field->field_name)))
+        {
+          my_error(ER_OUT_OF_RESOURCES, MYF(0));
+          return true;
+        }
+      }
+      else
+      {
+        Create_field *ref_field;
+        cl_it.rewind();
+        while ((ref_field= cl_it++))
+        {
+          if (0 == cmp_ident(ref_field->field_name, rf))
+            break;
+        }
+        // NB: following code is 1-to-1 as if branch, only with Create_field type
+        if (!ref_field)
+        {
+          if (!check_foreign)
+            continue;
+          my_error(ER_WRONG_FK_DEF, MYF(0), rf.str);
+          return true;
+        }
+        // Do we really need cmp_type() and not result_type() here?
+        if (cf->cmp_type() != ref_field->cmp_type())
+        {
+          if (!check_foreign)
+            continue;
+          my_error(ER_WRONG_FK_DEF, MYF(0), ff.str);
+          return true;
+        }
+        /* NB: case may be different. Let's store correct case. */
+        if (rf.strdup(thd->mem_root, LEX_STRING_WITH_LEN(ref_field->field_name)))
+        {
+          my_error(ER_OUT_OF_RESOURCES, MYF(0));
+          return true;
+        }
+      } // else (!ref_share)
+      /* NB: case may be different. Let's store correct case. */
+      if (ff.strdup(thd->mem_root, LEX_STRING_WITH_LEN(cf->field_name)))
+      {
+        my_error(ER_OUT_OF_RESOURCES, MYF(0));
+        return true;
+      }
+    } // for (ff)
+  } // for (fk)
+  return false;
+}
+
+
 /**
   @brief  Used in ALTER TABLE. Prepares data for conducting update on relates shares
   foreign_keys/referenced_keys which is done by fk_handle_alter().
@@ -12806,54 +12961,16 @@ bool Alter_table_ctx::fk_handle_alter(THD *thd)
     // Find prepared FK in fk_list. If ID exists, use it.
     FK_info *fk;
     List_iterator<FK_info> fk_it(new_foreign_keys);
-    if (new_fk.fk->constraint_name.str)
+    DBUG_ASSERT(new_fk.fk->constraint_name.str);
+    while ((fk= fk_it++))
     {
-      while ((fk= fk_it++))
+      if (0 == cmp_ident(fk->foreign_id, new_fk.fk->constraint_name))
       {
-        if (0 == cmp_ident(fk->foreign_id, new_fk.fk->constraint_name))
-        {
-          fk_it.remove();
-          break;
-        }
-      }
-      DBUG_ASSERT(fk);
-    }
-    else
-    {
-      // Otherwise match by parameters.
-      List_iterator_fast<Key_part_spec> col_it;
-      while ((fk= fk_it++))
-      {
-        if (fk->update_method != new_fk.fk->update_opt ||
-            fk->delete_method != new_fk.fk->delete_opt ||
-            fk->foreign_fields.elements != new_fk.fk->columns.elements)
-          continue;
-        if (cmp_table(fk->ref_db(), new_fk.ref.db) ||
-            cmp_table(fk->referenced_table, new_fk.ref.name))
-          continue;
-        col_it.init(new_fk.fk->columns);
-        for (const Lex_cstring &fld: fk->foreign_fields)
-        {
-          Key_part_spec *ref_col= col_it++;
-          if (cmp_ident(fld, ref_col->field_name))
-            break;
-        }
-        if (col_it.peek())
-          continue;
-        col_it.init(new_fk.fk->ref_columns);
-        for (const Lex_cstring &fld: fk->referenced_fields)
-        {
-          Key_part_spec *ref_col= col_it++;
-          if (cmp_ident(fld, ref_col->field_name))
-            break;
-        }
-        if (col_it.peek())
-          continue;
         fk_it.remove();
         break;
-      }  // while ((fk= fk_it++))
-      DBUG_ASSERT(fk);
+      }
     }
+    DBUG_ASSERT(fk);
 
     // Found matched FK. Now let's add it to referenced table.
     FK_info *dst= fk->clone(&ref_share->mem_root);

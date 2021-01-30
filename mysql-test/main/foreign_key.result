@@ -649,7 +649,7 @@ create or replace table t2 (id int, a int, foreign key fk (id) references t1 (id
 alter table t1 drop id;
 ERROR HY000: Cannot drop column 'id': needed in a foreign key constraint 'fk' of table `test`.`t2`
 alter table t2 drop id;
-ERROR HY000: Cannot drop index 'fk': needed in a foreign key constraint
+ERROR 42000: Incorrect foreign key definition for 'id'
 alter table t2 drop foreign key fk;
 drop tables t1, t2;
 # Check self-references
@@ -793,3 +793,41 @@ delete from t2;
 ERROR 23000: Cannot delete or update a parent row: a foreign key constraint fails (`test`.`t2`, CONSTRAINT `fk_t1_2` FOREIGN KEY (`id3`) REFERENCES `t2` (`id4`))
 drop table t2;
 set default_storage_engine= default;
+# Prohibit wrong references and fix field name case
+create table t1 (A int unique key, x timestamp references t1(a));
+ERROR 42000: Incorrect foreign key definition for 'x'
+create table t1 (A int unique key, x int references t1(b));
+ERROR 42000: Incorrect foreign key definition for 'b'
+create table t1 (A int unique key, x int references t1(a));
+alter table t1 add foreign key(x) references t1(b);
+ERROR 42000: Incorrect foreign key definition for 'b'
+alter table t1 add foreign key(x) references t1(a);
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `A` int(11) DEFAULT NULL,
+  `x` int(11) DEFAULT NULL,
+  UNIQUE KEY `A` (`A`),
+  KEY `fk_t1_2` (`x`),
+  CONSTRAINT `fk_t1` FOREIGN KEY (`x`) REFERENCES `t1` (`A`),
+  CONSTRAINT `fk_t1_2` FOREIGN KEY (`x`) REFERENCES `t1` (`A`)
+) ENGINE=MyISAM DEFAULT CHARSET=latin1
+create table t2 (AA int, x int references t1(ax));
+ERROR 42000: Incorrect foreign key definition for 'ax'
+create table t2 (AA int, x timestamp references t1(a));
+ERROR 42000: Incorrect foreign key definition for 'x'
+create table t2 (AA int, x int references t1(a));
+alter table t2 add foreign key(aa) references t1(b);
+ERROR 42000: Incorrect foreign key definition for 'b'
+alter table t2 add foreign key(aa) references t1(a);
+show create table t2;
+Table	Create Table
+t2	CREATE TABLE `t2` (
+  `AA` int(11) DEFAULT NULL,
+  `x` int(11) DEFAULT NULL,
+  KEY `fk_t2` (`x`),
+  KEY `fk_t2_2` (`AA`),
+  CONSTRAINT `fk_t2` FOREIGN KEY (`x`) REFERENCES `t1` (`A`),
+  CONSTRAINT `fk_t2_2` FOREIGN KEY (`AA`) REFERENCES `t1` (`A`)
+) ENGINE=MyISAM DEFAULT CHARSET=latin1
+drop tables t2, t1;

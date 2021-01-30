@@ -399,7 +399,7 @@ create or replace table t1 (id int primary key, a int);
 create or replace table t2 (id int, a int, foreign key fk (id) references t1 (id));
 --error ER_FK_COLUMN_CANNOT_DROP_CHILD
 alter table t1 drop id;
---error ER_DROP_INDEX_FK
+--error ER_WRONG_FK_DEF
 alter table t2 drop id;
 alter table t2 drop foreign key fk;
 drop tables t1, t2;
@@ -453,3 +453,28 @@ delete from t2;
 drop table t2;
 
 set default_storage_engine= default;
+
+--echo # Prohibit wrong references and fix field name case
+--error ER_WRONG_FK_DEF
+create table t1 (A int unique key, x timestamp references t1(a));
+--error ER_WRONG_FK_DEF
+create table t1 (A int unique key, x int references t1(b));
+create table t1 (A int unique key, x int references t1(a));
+--error ER_WRONG_FK_DEF
+alter table t1 add foreign key(x) references t1(b);
+alter table t1 add foreign key(x) references t1(a);
+
+show create table t1;
+--error ER_WRONG_FK_DEF
+create table t2 (AA int, x int references t1(ax));
+--error ER_WRONG_FK_DEF
+create table t2 (AA int, x timestamp references t1(a));
+
+create table t2 (AA int, x int references t1(a));
+
+--error ER_WRONG_FK_DEF
+alter table t2 add foreign key(aa) references t1(b);
+alter table t2 add foreign key(aa) references t1(a);
+
+show create table t2;
+drop tables t2, t1;

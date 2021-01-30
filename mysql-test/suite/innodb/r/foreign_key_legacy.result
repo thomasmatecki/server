@@ -438,7 +438,7 @@ ERROR HY000: Can't create table `test`.`t1` (errno: 197 "Table requires foreign 
 alter table t1 drop column x;
 ERROR HY000: Cannot drop index 'x': needed in a foreign key constraint
 alter table t2 drop column y;
-ERROR HY000: Cannot drop index 'fk_t2': needed in a foreign key constraint
+ERROR 42000: Incorrect foreign key definition for 'y'
 set global innodb_background_drop_list_empty= 1;
 select * from information_schema.innodb_sys_foreign;
 ERROR 42S02: Unknown table 'innodb_sys_foreign'
