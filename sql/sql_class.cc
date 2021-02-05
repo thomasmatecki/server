@@ -49,9 +49,6 @@
 #include <m_ctype.h>
 #include <sys/stat.h>
 #include <thr_alarm.h>
-#ifdef	__WIN__0
-#include <io.h>
-#endif
 #include <mysys_err.h>
 #include <limits.h>
 
@@ -70,6 +67,8 @@
 #ifdef WITH_WSREP
 #include "wsrep_thd.h"
 #include "wsrep_trans_observer.h"
+#else
+static inline bool wsrep_is_bf_aborted(THD* thd) { return false; }
 #endif /* WITH_WSREP */
 #include "opt_trace.h"
 
@@ -797,6 +796,7 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   mysql_mutex_init(key_LOCK_wakeup_ready, &LOCK_wakeup_ready, MY_MUTEX_INIT_FAST);
   mysql_mutex_init(key_LOCK_thd_kill, &LOCK_thd_kill, MY_MUTEX_INIT_FAST);
   mysql_cond_init(key_COND_wakeup_ready, &COND_wakeup_ready, 0);
+  mysql_mutex_record_order(&LOCK_thd_data, &LOCK_thd_kill);
 
   /* Variables with default values */
   proc_info="login";
@@ -1927,15 +1927,21 @@ void THD::awake_no_mutex(killed_state state_to_set)
   }
 
   /* Interrupt target waiting inside a storage engine. */
-  if (IF_WSREP(state_to_set != NOT_KILLED  && !wsrep_is_bf_aborted(this),
-               state_to_set != NOT_KILLED))
+  if (state_to_set != NOT_KILLED  && !wsrep_is_bf_aborted(this))
     ha_kill_query(this, thd_kill_level(this));
 
-  /* Broadcast a condition to kick the target if it is waiting on it. */
+  abort_current_cond_wait(false);
+  DBUG_VOID_RETURN;
+}
+
+/* Broadcast a condition to kick the target if it is waiting on it. */
+void THD::abort_current_cond_wait(bool force)
+{
+  mysql_mutex_assert_owner(&LOCK_thd_kill);
   if (mysys_var)
   {
     mysql_mutex_lock(&mysys_var->mutex);
-    if (!system_thread)		// Don't abort locks
+    if (!system_thread || force)                 // Don't abort locks
       mysys_var->abort=1;
 
     /*
@@ -1993,7 +1999,6 @@ void THD::awake_no_mutex(killed_state state_to_set)
     }
     mysql_mutex_unlock(&mysys_var->mutex);
   }
-  DBUG_VOID_RETURN;
 }
 
 
@@ -2047,16 +2052,7 @@ bool THD::notify_shared_lock(MDL_context_owner *ctx_in_use,
     mysql_mutex_lock(&in_use->LOCK_thd_kill);
     if (in_use->killed < KILL_CONNECTION)
       in_use->set_killed_no_mutex(KILL_CONNECTION);
-    if (in_use->mysys_var)
-    {
-      mysql_mutex_lock(&in_use->mysys_var->mutex);
-      if (in_use->mysys_var->current_cond)
-        mysql_cond_broadcast(in_use->mysys_var->current_cond);
-
-      /* Abort if about to wait in thr_upgrade_write_delay_lock */
-      in_use->mysys_var->abort= 1;
-      mysql_mutex_unlock(&in_use->mysys_var->mutex);
-    }
+    in_use->abort_current_cond_wait(true);
     mysql_mutex_unlock(&in_use->LOCK_thd_kill);
     signalled= TRUE;
   }
