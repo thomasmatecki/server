@@ -474,10 +474,11 @@ struct trx_lock_t
 	mem_heap_t*	lock_heap;	/*!< memory heap for trx_locks;
 					protected by lock_sys.latch */
 
-	trx_lock_list_t trx_locks;	/*!< locks requested by the transaction;
-					insertions are protected by trx->mutex
-					and lock_sys.latch; removals are
-					protected by lock_sys.latch */
+  /** Locks held by the transaction. Protected by lock_sys.assert_locked()
+  or the combination of lock_sys.assert_locked(*lock) and trx->mutex.
+  (If lock_sys.latch is only held in shared mode, then the modification
+  must be protected by trx->mutex.) */
+  trx_lock_list_t trx_locks;
 
 	lock_list	table_locks;	/*!< All table locks requested by this
 					transaction, including AUTOINC locks */
@@ -485,7 +486,7 @@ struct trx_lock_t
 	/** List of pending trx_t::evict_table() */
 	UT_LIST_BASE_NODE_T(dict_table_t) evicted_tables;
 
-  /** number of record locks; writers use LockGuard or LockMutexGuard */
+  /** number of record locks; protected by lock_sys.assert_locked(page_id) */
   ulint n_rec_locks;
 };
 

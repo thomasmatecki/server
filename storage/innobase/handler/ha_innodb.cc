@@ -18008,7 +18008,6 @@ int wsrep_innobase_kill_one_trx(THD *bf_thd, trx_t *victim_trx, bool signal)
 {
 	ut_ad(bf_thd);
 	ut_ad(victim_trx);
-	lock_sys.assert_locked();
 	ut_ad(victim_trx->mutex_is_owner());
 
 	DBUG_ENTER("wsrep_innobase_kill_one_trx");
@@ -18069,6 +18068,7 @@ int wsrep_innobase_kill_one_trx(THD *bf_thd, trx_t *victim_trx, bool signal)
 	} else if (victim_trx->lock.wait_lock) {
 		mysql_mutex_lock(&lock_sys.wait_mutex);
 		if (lock_t* wait_lock = victim_trx->lock.wait_lock) {
+			lock_sys.assert_locked(*wait_lock);
 			DBUG_ASSERT(victim_trx->is_wsrep());
 			WSREP_DEBUG("victim has wait flag: %lu",
 				    thd_get_thread_id(thd));

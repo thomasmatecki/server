@@ -60,6 +60,132 @@ extern "C" int thd_need_wait_reports(const MYSQL_THD thd);
 extern "C" int thd_need_ordering_with(const MYSQL_THD thd, const MYSQL_THD other_thd);
 #endif
 
+/** Functor for accessing the embedded node within a table lock. */
+struct TableLockGetNode
+{
+  ut_list_node<lock_t> &operator()(lock_t &elem)
+  { return(elem.un_member.tab_lock.locks); }
+};
+
+#ifdef UNIV_DEBUG
+/** Assert that a lock shard is exclusively latched by this thread */
+void lock_sys_t::assert_locked(const lock_t &lock) const
+{
+  if (is_writer())
+    return;
+  if (lock.is_table())
+    assert_locked(*lock.un_member.tab_lock.table);
+  else
+    assert_locked(lock.un_member.rec_lock.page_id);
+}
+
+/** Assert that a table lock shard is exclusively latched by this thread */
+void lock_sys_t::assert_locked(const dict_table_t &table) const
+{
+  ut_ad(!table.is_temporary());
+
+  const os_thread_id_t current_thread= os_thread_get_curr_id();
+  if (writer.load(std::memory_order_relaxed) == current_thread)
+    return;
+  ut_ad(readers);
+  ut_ad(current_thread == table_latch_owners[table.id % LATCHES]);
+}
+
+/** Assert that a page shard is exclusively latched by this thread */
+void lock_sys_t::assert_locked(const page_id_t id) const
+{
+  const os_thread_id_t current_thread= os_thread_get_curr_id();
+  if (writer.load(std::memory_order_relaxed) == current_thread)
+    return;
+  ut_ad(readers);
+  ut_ad(current_thread == page_latch_owners[get_page_latch(id)]);
+}
+#endif
+
+/** Acquire a table lock mutex.
+@return parameter to unlock_table_latch() that the caller must invoke */
+inline unsigned lock_sys_t::lock_table_latch(table_id_t id)
+{
+  unsigned shard= static_cast<unsigned>(id % LATCHES);
+  ut_ad(readers);
+  table_latches[shard].wr_lock();
+  ut_ad(!table_latch_owners[shard]);
+  ut_d(table_latch_owners[shard]= os_thread_get_curr_id());
+  return shard;
+}
+
+/** Acquire a page lock mutex. */
+inline void lock_sys_t::lock_page_latch(unsigned shard)
+{
+  ut_ad(readers);
+  page_latches[shard].wr_lock();
+  ut_ad(!page_latch_owners[shard]);
+  ut_d(page_latch_owners[shard]= os_thread_get_curr_id());
+}
+
+/** Acquire a page lock mutex.
+@return parameter to unlock_page_latch() that the caller must invoke */
+inline unsigned lock_sys_t::lock_page_latch(page_id_t id)
+{
+  unsigned shard= get_page_latch(id);
+  lock_page_latch(shard);
+  return shard;
+}
+
+LockGuard::LockGuard(page_id_t id)
+{
+  lock_sys.rd_lock(SRW_LOCK_CALL);
+  shard= lock_sys.lock_page_latch(id);
+}
+
+#ifdef WITH_WSREP
+LockGGuard::LockGGuard(page_id_t id, bool all)
+{
+  if (UNIV_UNLIKELY(all))
+  {
+    shard= ~0U;
+    lock_sys.wr_lock(SRW_LOCK_CALL);
+  }
+  else
+  {
+    lock_sys.rd_lock(SRW_LOCK_CALL);
+    shard= lock_sys.lock_page_latch(id);
+  }
+}
+
+LockGGuard::~LockGGuard()
+{
+  if (UNIV_UNLIKELY(shard == ~0U))
+    lock_sys.wr_unlock();
+  else
+  {
+    lock_sys.rd_unlock();
+    lock_sys.unlock_page_latch(shard);
+  }
+}
+#endif
+
+LockMultiGuard::LockMultiGuard(const page_id_t id1, const page_id_t id2)
+{
+  ut_ad(id1.space() == id2.space());
+  shard1= lock_sys.get_page_latch(id1);
+  shard2= lock_sys.get_page_latch(id2);
+  if (shard1 > shard2)
+    std::swap(shard1, shard2);
+  lock_sys.rd_lock(SRW_LOCK_CALL);
+  lock_sys.lock_page_latch(shard1);
+  if (shard1 != shard2)
+    lock_sys.lock_page_latch(shard2);
+}
+
+LockMultiGuard::~LockMultiGuard()
+{
+  lock_sys.rd_unlock();
+  lock_sys.unlock_page_latch(shard1);
+  if (shard1 != shard2)
+    lock_sys.unlock_page_latch(shard2);
+}
+
 /** Pretty-print a table lock.
 @param[in,out]	file	output stream
 @param[in]	lock	table lock */
@@ -343,6 +469,10 @@ void lock_sys_t::create(ulint n_cells)
   m_initialised= true;
 
   latch.SRW_LOCK_INIT(lock_latch_key);
+  for (size_t i= 0; i < LATCHES; i++)
+    page_latches[i].init();
+  for (size_t i= 0; i < LATCHES; i++)
+    table_latches[i].init();
   mysql_mutex_init(lock_wait_mutex_key, &wait_mutex, nullptr);
 
   rec_hash.create(n_cells);
@@ -355,7 +485,6 @@ void lock_sys_t::create(ulint n_cells)
     ut_a(lock_latest_err_file);
   }
 }
-
 
 #ifdef UNIV_PFS_RWLOCK
 /** Acquire exclusive lock_sys.latch */
@@ -448,6 +577,10 @@ void lock_sys_t::close()
   prdt_page_hash.free();
 
   latch.destroy();
+  for (size_t i= 0; i < LATCHES; i++)
+    page_latches[i].destroy();
+  for (size_t i= 0; i < LATCHES; i++)
+    table_latches[i].destroy();
   mysql_mutex_destroy(&wait_mutex);
 
   m_initialised= false;
@@ -1084,20 +1217,6 @@ wsrep_print_wait_locks(
 }
 #endif /* WITH_WSREP */
 
-#ifdef UNIV_DEBUG
-/** Assert that a lock shard is exclusively latched by this thread */
-void lock_sys_t::assert_locked(const lock_t &) const
-{
-  assert_locked();
-}
-
-/** Assert that a table lock shard is exclusively latched by this thread */
-void lock_sys_t::assert_locked(const dict_table_t &) const
-{
-  assert_locked();
-}
-#endif
-
 /** Reset the wait status of a lock.
 @param[in,out]	lock	lock that was possibly being waited for */
 static void lock_reset_lock_and_trx_wait(lock_t *lock)
@@ -1126,6 +1245,122 @@ static void lock_set_lock_and_trx_wait(lock_t *lock, trx_t *trx)
 
   trx->lock.wait_lock= lock;
   lock->type_mode|= LOCK_WAIT;
+}
+
+/** Create a waiting record lock in brute-force handling.
+@param c_lock  conflicting lock
+@param thr     query thread
+@param lock    requested lock
+@param trx     transaction
+@return whether the lock can be returned */
+ATTRIBUTE_COLD ATTRIBUTE_NOINLINE
+static bool lock_rec_create_wsrep(lock_t *c_lock, que_thr_t *thr, lock_t *lock,
+                                  trx_t *trx, bool holds_trx_mutex)
+{
+  ut_ad(!lock->is_table());
+  lock_sys.assert_locked();
+
+  lock_t *hash= static_cast<lock_t*>(c_lock->hash);
+  lock_t *prev= nullptr;
+
+  while (hash && wsrep_thd_is_BF(hash->trx->mysql_thd, false) &&
+         wsrep_thd_order_before(hash->trx->mysql_thd, trx->mysql_thd))
+  {
+    prev= hash;
+    hash= static_cast<lock_t*>(hash->hash);
+  }
+  lock->hash= hash;
+  if (prev)
+    prev->hash= lock;
+  else
+    c_lock->hash= lock;
+  /*
+  * delayed conflict resolution '...kill_one_trx' was not called,
+  * if victim was waiting for some other lock
+  */
+  if (holds_trx_mutex)
+    trx->mutex_unlock();
+  mysql_mutex_lock(&lock_sys.wait_mutex);
+  trx->mutex_lock();
+  trx_t *ctrx= c_lock->trx;
+  ctrx->mutex_lock();
+
+  const bool ret= ctrx->lock.wait_thr != nullptr;
+  if (ret)
+  {
+    ctrx->lock.was_chosen_as_deadlock_victim= 3;
+
+    if (UNIV_UNLIKELY(wsrep_debug))
+      wsrep_print_wait_locks(c_lock);
+
+    lock_set_lock_and_trx_wait(lock, trx);
+    UT_LIST_ADD_LAST(trx->lock.trx_locks, lock);
+
+    trx->lock.wait_thr= thr;
+
+    /* have to release trx mutex for the duration of
+    victim lock release. This will eventually call
+    lock_grant, which wants to grant trx mutex again
+    */
+    if (holds_trx_mutex)
+      trx->mutex_unlock();
+    lock_cancel_waiting_and_release(ctrx->lock.wait_lock);
+    if (holds_trx_mutex)
+      trx->mutex_lock();
+  }
+  mysql_mutex_unlock(&lock_sys.wait_mutex);
+  ctrx->mutex_unlock();
+  return ret;
+}
+
+/** Create a waiting table lock.
+@param c_lock  conflicting lock
+@param lock    requested lock
+@param table   table
+@param trx     transaction */
+ATTRIBUTE_COLD ATTRIBUTE_NOINLINE
+static void lock_table_create_wsrep(lock_t *c_lock, lock_t *lock, dict_table_t *table, trx_t *trx)
+{
+  ut_ad(lock->is_table());
+  lock_sys.assert_locked();
+
+  trx_t *c_trx= c_lock->trx;
+
+  if (wsrep_thd_is_BF(trx->mysql_thd, FALSE))
+  {
+    ut_list_insert(table->locks, c_lock, lock, TableLockGetNode());
+    if (UNIV_UNLIKELY(wsrep_debug))
+    {
+      wsrep_report_bf_lock_wait(trx->mysql_thd, trx->id);
+      wsrep_report_bf_lock_wait(c_trx->mysql_thd, c_trx->id);
+    }
+  }
+  else
+    ut_list_append(table->locks, lock, TableLockGetNode());
+
+  trx->mutex_unlock();
+  mysql_mutex_lock(&lock_sys.wait_mutex);
+  c_trx->mutex_lock();
+
+  if (c_trx->lock.wait_thr)
+  {
+    c_trx->lock.was_chosen_as_deadlock_victim= true;
+
+    if (UNIV_UNLIKELY(wsrep_debug))
+    {
+      wsrep_report_bf_lock_wait(trx->mysql_thd, trx->id);
+      wsrep_report_bf_lock_wait(c_trx->mysql_thd, c_trx->id);
+      wsrep_print_wait_locks(c_lock);
+    }
+
+    /* The lock release will call lock_grant(),
+    which would acquire trx->mutex again. */
+    lock_cancel_waiting_and_release(c_trx->lock.wait_lock);
+  }
+
+  mysql_mutex_unlock(&lock_sys.wait_mutex);
+  c_trx->mutex_unlock();
+  trx->mutex_lock();
 }
 #endif
 
@@ -1229,72 +1464,15 @@ lock_rec_create_low(
 #ifdef WITH_WSREP
 	if (c_lock && trx->is_wsrep()
 	    && wsrep_thd_is_BF(trx->mysql_thd, FALSE)) {
-		lock_t *hash	= (lock_t *)c_lock->hash;
-		lock_t *prev	= NULL;
-
-		while (hash && wsrep_thd_is_BF(hash->trx->mysql_thd, FALSE)
-		       && wsrep_thd_order_before(hash->trx->mysql_thd,
-						 trx->mysql_thd)) {
-			prev = hash;
-			hash = (lock_t *)hash->hash;
-		}
-		lock->hash = hash;
-		if (prev) {
-			prev->hash = lock;
-		} else {
-			c_lock->hash = lock;
-		}
-		/*
-		 * delayed conflict resolution '...kill_one_trx' was not called,
-		 * if victim was waiting for some other lock
-		 */
-		if (holds_trx_mutex) {
-			trx->mutex_unlock();
-		}
-		mysql_mutex_lock(&lock_sys.wait_mutex);
-		if (holds_trx_mutex) {
-			trx->mutex_lock();
-		}
-		trx_t *ctrx = c_lock->trx;
-		ctrx->mutex_lock();
-		if (ctrx->lock.wait_thr) {
-			ctrx->lock.was_chosen_as_deadlock_victim = 3;
-
-			if (UNIV_UNLIKELY(wsrep_debug)) {
-				wsrep_print_wait_locks(c_lock);
-			}
-
-			lock_set_lock_and_trx_wait(lock, trx);
-			UT_LIST_ADD_LAST(trx->lock.trx_locks, lock);
-
-			trx->lock.wait_thr = thr;
-
-			/* have to release trx mutex for the duration of
-			   victim lock release. This will eventually call
-			   lock_grant, which wants to grant trx mutex again
-			*/
-			if (holds_trx_mutex) {
-				trx->mutex_unlock();
-			}
-			lock_cancel_waiting_and_release(
-				ctrx->lock.wait_lock);
-
-			if (holds_trx_mutex) {
-				trx->mutex_lock();
-			}
-
-			ctrx->mutex_unlock();
-
+		if (lock_rec_create_wsrep(c_lock, thr, lock, trx,
+					  holds_trx_mutex)) {
 			/* have to bail out here to avoid lock_set_lock... */
-			mysql_mutex_unlock(&lock_sys.wait_mutex);
 			return(lock);
 		}
-		mysql_mutex_unlock(&lock_sys.wait_mutex);
-		ctrx->mutex_unlock();
 	} else
 #endif /* WITH_WSREP */
-		HASH_INSERT(lock_t, hash, lock_hash_get(type_mode),
-			    page_id.fold(), lock);
+	HASH_INSERT(lock_t, hash, lock_hash_get(type_mode),
+		    page_id.fold(), lock);
 
 	if (!holds_trx_mutex) {
 		trx->mutex_lock();
@@ -1351,6 +1529,7 @@ lock_rec_enqueue_waiting(
 
 	trx_t* trx = thr_get_trx(thr);
 	ut_ad(trx->mutex_is_owner());
+	ut_ad(!trx->is_wsrep() || lock_sys.is_writer());
 
 	switch (trx_get_dict_operation(trx)) {
 	case TRX_DICT_OP_NONE:
@@ -1579,7 +1758,7 @@ lock_rec_lock(
 
   MONITOR_ATOMIC_INC(MONITOR_NUM_RECLOCK_REQ);
   const page_id_t id{block->page.id()};
-  LockGuard g{id};
+  IF_WSREP(LockGGuard g(id,trx->is_wsrep()),LockGuard g{id});
 
   if (lock_t *lock= lock_sys.get_first(id))
   {
@@ -1944,7 +2123,6 @@ static void lock_rec_dequeue_from_page(lock_t *in_lock, bool owns_wait_mutex)
 	ut_ad(owns_wait_mutex == mysql_mutex_is_owner(&lock_sys.wait_mutex));
 #endif /* SAFE_MUTEX */
 	ut_ad(!in_lock->is_table());
-	/* We may or may not be holding in_lock->trx->mutex here. */
 
 	const page_id_t page_id{in_lock->un_member.rec_lock.page_id};
 	lock_sys.assert_locked(page_id);
@@ -1955,6 +2133,7 @@ static void lock_rec_dequeue_from_page(lock_t *in_lock, bool owns_wait_mutex)
 	const ulint rec_fold = page_id.fold();
 
 	HASH_DELETE(lock_t, hash, lock_hash, rec_fold, in_lock);
+	ut_ad(lock_sys.is_writer() || in_lock->trx->mutex_is_owner());
 	UT_LIST_REMOVE(in_lock->trx->lock.trx_locks, in_lock);
 
 	MONITOR_INC(MONITOR_RECLOCK_REMOVED);
@@ -2003,22 +2182,20 @@ lock_rec_discard(
 					record locks which are contained
 					in this lock object are removed */
 {
-	trx_lock_t*	trx_lock;
+  ut_ad(!in_lock->is_table());
+  lock_sys.assert_locked(in_lock->un_member.rec_lock.page_id);
 
-	ut_ad(!in_lock->is_table());
-	lock_sys.assert_locked(in_lock->un_member.rec_lock.page_id);
+  trx_t *trx= in_lock->trx;
+  in_lock->index->table->n_rec_locks--;
 
-	trx_lock = &in_lock->trx->lock;
+  HASH_DELETE(lock_t, hash, lock_hash_get(in_lock->type_mode),
+              in_lock->un_member.rec_lock.page_id.fold(), in_lock);
+  trx->mutex_lock();
+  UT_LIST_REMOVE(trx->lock.trx_locks, in_lock);
+  trx->mutex_unlock();
 
-	in_lock->index->table->n_rec_locks--;
-
-	HASH_DELETE(lock_t, hash, lock_hash_get(in_lock->type_mode),
-		    in_lock->un_member.rec_lock.page_id.fold(), in_lock);
-
-	UT_LIST_REMOVE(trx_lock->trx_locks, in_lock);
-
-	MONITOR_INC(MONITOR_RECLOCK_REMOVED);
-	MONITOR_DEC(MONITOR_NUM_RECLOCK);
+  MONITOR_INC(MONITOR_RECLOCK_REMOVED);
+  MONITOR_DEC(MONITOR_NUM_RECLOCK);
 }
 
 /*************************************************************//**
@@ -2293,7 +2470,14 @@ lock_move_reorganize_page(
     UT_LIST_INIT(old_locks, &lock_t::trx_locks);
 
     const page_id_t id{block->page.id()};
-    LockGuard g{id};
+    {
+      LockGuard g{id};
+      if (!lock_sys.get_first(id))
+        return;
+    }
+
+    /* We will modify arbitrary trx->lock.trx_locks. */
+    LockMutexGuard g{SRW_LOCK_CALL};
 
     /* FIXME: This needs to deal with predicate lock too */
     lock_t *lock= lock_sys.get_first(id);
@@ -2424,7 +2608,7 @@ lock_move_rec_list_end(
   const page_id_t id{block->page.id()};
   const page_id_t new_id{new_block->page.id()};
   {
-    LockMutexGuard g{SRW_LOCK_CALL};
+    LockMultiGuard g{id, new_id};
 
     /* Note: when we move locks from record to record, waiting locks
     and possible granted gap type locks behind them are enqueued in
@@ -2543,7 +2727,7 @@ lock_move_rec_list_start(
   const page_id_t new_id{new_block->page.id()};
 
   {
-    LockMutexGuard g{SRW_LOCK_CALL};
+    LockMultiGuard g{id, new_id};
 
     for (lock_t *lock= lock_sys.get_first(id); lock;
          lock= lock_rec_get_next_on_page(lock))
@@ -2647,7 +2831,7 @@ lock_rtr_move_rec_list(
   const page_id_t new_id{new_block->page.id()};
 
   {
-    LockMutexGuard g{SRW_LOCK_CALL};
+    LockMultiGuard g{id, new_id};
 
     for (lock_t *lock= lock_sys.get_first(id); lock;
 	 lock= lock_rec_get_next_on_page(lock))
@@ -2716,7 +2900,7 @@ lock_update_split_right(
   const page_id_t l{left_block->page.id()};
   const page_id_t r{right_block->page.id()};
 
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockMultiGuard g{l, r};
 
   /* Move the locks on the supremum of the left page to the supremum
   of the right page */
@@ -2747,7 +2931,7 @@ lock_update_merge_right(
 
 	const page_id_t l{left_block->page.id()};
 	const page_id_t r{right_block->page.id()};
-	LockMutexGuard g{SRW_LOCK_CALL};
+	LockMultiGuard g{l, r};
 
 	/* Inherit the locks from the supremum of the left page to the
 	original successor of infimum on the right page, to which the left
@@ -2778,7 +2962,7 @@ of the root page will act as a dummy carrier of the locks of the record
 to be updated. */
 void lock_update_root_raise(const buf_block_t &block, const page_id_t root)
 {
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockMultiGuard g{block.page.id(), root};
   /* Move the locks on the supremum of the root to the supremum of block */
   lock_rec_move(block, root, PAGE_HEAP_NO_SUPREMUM, PAGE_HEAP_NO_SUPREMUM);
 }
@@ -2788,7 +2972,7 @@ void lock_update_root_raise(const buf_block_t &block, const page_id_t root)
 @param old        old page (not index root page) */
 void lock_update_copy_and_discard(const buf_block_t &new_block, page_id_t old)
 {
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockMultiGuard g{new_block.page.id(), old};
   /* Move the locks on the supremum of the old page to the supremum of new */
   lock_rec_move(new_block, old, PAGE_HEAP_NO_SUPREMUM, PAGE_HEAP_NO_SUPREMUM);
   lock_rec_free_all_from_discard_page(old);
@@ -2805,7 +2989,7 @@ lock_update_split_left(
   ulint h= lock_get_min_heap_no(right_block);
   const page_id_t l{left_block->page.id()};
   const page_id_t r{right_block->page.id()};
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockMultiGuard g{l, r};
   /* Inherit the locks to the supremum of the left page from the
   successor of the infimum on the right page */
   lock_rec_inherit_to_gap(l, r, left_block->frame, PAGE_HEAP_NO_SUPREMUM, h);
@@ -2822,7 +3006,7 @@ void lock_update_merge_left(const buf_block_t& left, const rec_t *orig_pred,
 
   const page_id_t l{left.page.id()};
 
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockMultiGuard g{l, right};
   const rec_t *left_next_rec= page_rec_get_next_const(orig_pred);
 
   if (!page_rec_is_supremum(left_next_rec))
@@ -2867,7 +3051,7 @@ lock_rec_reset_and_inherit_gap_locks(
 						donating record */
 {
   const page_id_t heir{heir_block.page.id()};
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockMultiGuard g{heir, donor};
   lock_rec_reset_and_release_wait(heir, heir_heap_no);
   lock_rec_inherit_to_gap(heir, donor, heir_block.frame, heir_heap_no, heap_no);
 }
@@ -2889,7 +3073,7 @@ lock_update_discard(
 	ulint		heap_no;
 	const page_id_t	heir(heir_block->page.id());
 	const page_id_t	page_id(block->page.id());
-	LockMutexGuard	g{SRW_LOCK_CALL};
+	LockMultiGuard	g{heir, page_id};
 
 	if (lock_sys.get_first(page_id)) {
 		ut_ad(!lock_sys.get_first_prdt(page_id));
@@ -2998,7 +3182,7 @@ lock_update_delete(
 	}
 
 	const page_id_t id{block->page.id()};
-	LockMutexGuard g{SRW_LOCK_CALL};
+	LockGuard g{id};
 
 	/* Let the next record inherit the locks from rec, in gap mode */
 
@@ -3031,7 +3215,7 @@ lock_rec_store_on_page_infimum(
   ut_ad(block->frame == page_align(rec));
   const page_id_t id{block->page.id()};
 
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockGuard g{id};
   lock_rec_move(*block, id, PAGE_HEAP_NO_INFIMUM, heap_no);
 }
 
@@ -3045,19 +3229,11 @@ void lock_rec_restore_from_page_infimum(const buf_block_t &block,
 					const rec_t *rec, page_id_t donator)
 {
   const ulint heap_no= page_rec_get_heap_no(rec);
-  LockMutexGuard g{SRW_LOCK_CALL};
+  LockMultiGuard g{block.page.id(), donator};
   lock_rec_move(block, donator, heap_no, PAGE_HEAP_NO_INFIMUM);
 }
 
 /*========================= TABLE LOCKS ==============================*/
-
-/** Functor for accessing the embedded node within a table lock. */
-struct TableLockGetNode {
-	ut_list_node<lock_t>& operator() (lock_t& elem)
-	{
-		return(elem.un_member.tab_lock.locks);
-	}
-};
 
 /*********************************************************************//**
 Creates a table lock object and adds it as the last in the lock queue
@@ -3082,6 +3258,7 @@ lock_table_create(
 	ut_ad(table && trx);
 	lock_sys.assert_locked(*table);
 	ut_ad(trx->mutex_is_owner());
+	ut_ad(!trx->is_wsrep() || lock_sys.is_writer());
 
 	check_trx_state(trx);
 
@@ -3125,39 +3302,7 @@ allocated:
 
 #ifdef WITH_WSREP
 	if (c_lock && trx->is_wsrep()) {
-		if (wsrep_thd_is_BF(trx->mysql_thd, FALSE)) {
-			ut_list_insert(table->locks, c_lock, lock,
-				       TableLockGetNode());
-			if (UNIV_UNLIKELY(wsrep_debug)) {
-				wsrep_report_bf_lock_wait(trx->mysql_thd, trx->id);
-				wsrep_report_bf_lock_wait(c_lock->trx->mysql_thd, c_lock->trx->id);
-			}
-		} else {
-			ut_list_append(table->locks, lock, TableLockGetNode());
-		}
-
-		trx->mutex_unlock();
-		mysql_mutex_lock(&lock_sys.wait_mutex);
-		c_lock->trx->mutex_lock();
-
-		if (c_lock->trx->lock.wait_thr) {
-			c_lock->trx->lock.was_chosen_as_deadlock_victim = TRUE;
-
-			if (UNIV_UNLIKELY(wsrep_debug)) {
-				wsrep_report_bf_lock_wait(trx->mysql_thd, trx->id);
-				wsrep_report_bf_lock_wait(c_lock->trx->mysql_thd, c_lock->trx->id);
-				wsrep_print_wait_locks(c_lock);
-			}
-
-			/* The lock release will call lock_grant(),
-			which would acquire trx->mutex again. */
-			lock_cancel_waiting_and_release(
-				c_lock->trx->lock.wait_lock);
-		}
-
-		mysql_mutex_unlock(&lock_sys.wait_mutex);
-		c_lock->trx->mutex_unlock();
-		trx->mutex_lock();
+		lock_table_create_wsrep(c_lock, lock, table, trx);
 	} else
 #endif /* WITH_WSREP */
 	ut_list_append(table->locks, lock, TableLockGetNode());
@@ -3270,6 +3415,7 @@ lock_table_remove_low(
 	trx = lock->trx;
 	table = lock->un_member.tab_lock.table;
 	lock_sys.assert_locked(*table);
+	ut_ad(lock_sys.is_writer() || trx->mutex_is_owner());
 
 	/* Remove the table from the transaction's AUTOINC vector, if
 	the lock that is being released is an AUTOINC lock. */
@@ -3466,7 +3612,19 @@ lock_table(
 
 	err = DB_SUCCESS;
 
-	LockTableGuard g{*table};
+#ifdef WITH_WSREP
+	unsigned shard;
+	if (trx->is_wsrep()) {
+		shard = ~0U;
+		lock_sys.wr_lock(SRW_LOCK_CALL);
+	} else {
+		lock_sys.rd_lock(SRW_LOCK_CALL);
+		shard = lock_sys.lock_table_latch(table->id);
+	}
+#else
+	lock_sys.rd_lock(SRW_LOCK_CALL);
+	const unsigned shard = lock_sys.lock_table_latch(table->id);
+#endif
 
 	/* We have to check if the new lock is compatible with any locks
 	other transactions have in the table lock queue. */
@@ -3486,7 +3644,16 @@ lock_table(
 		lock_table_create(table, mode, trx);
 	}
 
+#ifdef WITH_WSREP
+	if (UNIV_UNLIKELY(shard == ~0U)) {
+		lock_sys.wr_unlock();
+		trx->mutex_unlock();
+		return err;
+	}
+#endif
+	lock_sys.rd_unlock();
 	trx->mutex_unlock();
+	lock_sys.unlock_table_latch(shard);
 
 	return(err);
 }
@@ -3826,6 +3993,7 @@ void lock_release(trx_t* trx)
 	}
 
 	trx->lock.was_chosen_as_deadlock_victim = false;
+	trx->lock.n_rec_locks = 0;
 }
 
 /*********************************************************************//**
@@ -4137,6 +4305,7 @@ lock_trx_print_locks(
 	mtr_t mtr;
 	uint32_t i= 0;
 	/* Iterate over the transaction's locks. */
+	lock_sys.assert_locked();
 	for (lock_t *lock = UT_LIST_GET_FIRST(trx->lock.trx_locks);
 	     lock != NULL;
 	     lock = UT_LIST_GET_NEXT(trx_locks, lock)) {
@@ -4680,7 +4849,7 @@ lock_rec_insert_check_and_lock(
   ut_ad(!rec_is_metadata(next_rec, *index));
 
   {
-    LockGuard g{id};
+    IF_WSREP(LockGGuard g(id,trx->is_wsrep()),LockGuard g{id});
     /* Because this code is invoked for a running transaction by
     the thread that is serving the transaction, it is not necessary
     to hold trx->mutex here. */
@@ -4780,7 +4949,7 @@ lock_rec_convert_impl_to_expl_for_trx(
 
   DEBUG_SYNC_C("before_lock_rec_convert_impl_to_expl_for_trx");
   {
-    LockMutexGuard g{SRW_LOCK_CALL};
+    LockGuard g{id};
     trx->mutex_lock();
     ut_ad(!trx_state_eq(trx, TRX_STATE_NOT_STARTED));
 
@@ -6101,7 +6270,7 @@ lock_update_split_and_merge(
 
 	const page_id_t l{left_block->page.id()};
 	const page_id_t r{right_block->page.id()};
-	LockMutexGuard g{SRW_LOCK_CALL};
+	LockMultiGuard g{l, r};
 
 	left_next_rec = page_rec_get_next_const(orig_pred);
 	ut_ad(!page_rec_is_metadata(left_next_rec));

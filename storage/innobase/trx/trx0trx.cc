@@ -491,7 +491,7 @@ inline void trx_t::release_locks()
   if (UT_LIST_GET_LEN(lock.trx_locks))
   {
     lock_release(this);
-    lock.n_rec_locks = 0;
+    ut_ad(!lock.n_rec_locks);
     ut_ad(UT_LIST_GET_LEN(lock.trx_locks) == 0);
     ut_ad(ib_vector_is_empty(autoinc_locks));
     mem_heap_empty(lock.lock_heap);

@@ -660,7 +660,7 @@ lock_prdt_update_split(
 	lock_prdt_t*	new_prdt,	/*!< in: MBR on the new page */
 	const page_id_t	page_id)	/*!< in: page number */
 {
-	LockMutexGuard g{SRW_LOCK_CALL};
+	LockMultiGuard g{page_id, new_block->page.id()};
 
 	lock_prdt_update_split_low(new_block, prdt, new_prdt,
 				   page_id, LOCK_PREDICATE);
@@ -877,7 +877,7 @@ lock_prdt_rec_move(
 						the receiving record */
 	const page_id_t		donator)	/*!< in: target page */
 {
-	LockMutexGuard g{SRW_LOCK_CALL};
+	LockMultiGuard g{receiver->page.id(), donator};
 
 	for (lock_t *lock = lock_rec_get_first(&lock_sys.prdt_hash,
 					       donator, PRDT_HEAPNO);
