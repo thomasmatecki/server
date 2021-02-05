@@ -387,7 +387,7 @@ rtr_pcur_getnext_from_path(
 			trx_t*		trx = thr_get_trx(
 						btr_cur->rtr_info->thr);
 			{
-				LockMutexGuard g;
+				LockMutexGuard g{SRW_LOCK_CALL};
 				lock_init_prdt_from_mbr(
 					&prdt, &btr_cur->rtr_info->mbr,
 					mode, trx->lock.lock_heap);

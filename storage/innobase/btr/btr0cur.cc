@@ -1999,7 +1999,7 @@ retry_page_get:
 		lock_prdt_t	prdt;
 
 		{
-			LockMutexGuard g;
+			LockGuard g{block->page.id()};
 			lock_init_prdt_from_mbr(
 				&prdt, &cursor->rtr_info->mbr, mode,
 				trx->lock.lock_heap);
