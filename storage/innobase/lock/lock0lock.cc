@@ -5534,17 +5534,6 @@ lock_table_lock_list_init(
 	UT_LIST_INIT(*lock_list, &lock_table_t::locks);
 }
 
-/*******************************************************************//**
-Initialise the trx lock list. */
-void
-lock_trx_lock_list_init(
-/*====================*/
-	trx_lock_list_t*	lock_list)	/*!< List to initialise */
-{
-	UT_LIST_INIT(*lock_list, &lock_t::trx_locks);
-}
-
-
 #ifdef UNIV_DEBUG
 /*******************************************************************//**
 Check if the transaction holds any locks on the sys tables
