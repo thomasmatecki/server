@@ -1436,6 +1436,11 @@ lock_rec_create_low(
 		}
 	}
 
+	if (!holds_trx_mutex) {
+		trx->mutex_lock();
+	}
+	ut_ad(trx->mutex_is_owner());
+
 	if (trx->lock.rec_cached >= UT_ARR_SIZE(trx->lock.rec_pool)
 	    || sizeof *lock + n_bytes > sizeof *trx->lock.rec_pool) {
 		lock = static_cast<lock_t*>(
@@ -1474,10 +1479,6 @@ lock_rec_create_low(
 	HASH_INSERT(lock_t, hash, lock_hash_get(type_mode),
 		    page_id.fold(), lock);
 
-	if (!holds_trx_mutex) {
-		trx->mutex_lock();
-	}
-	ut_ad(trx->mutex_is_owner());
 	if (type_mode & LOCK_WAIT) {
 		ut_ad(!trx->lock.wait_lock
 		      || (*trx->lock.wait_lock).trx == trx);
@@ -1700,7 +1701,15 @@ lock_rec_add_to_queue(
 		we can just set the bit */
 		if (lock_t* lock = lock_rec_find_similar_on_page(
 			    type_mode, heap_no, first_lock, trx)) {
+			if (caller_owns_trx_mutex) {
+				trx->mutex_unlock();
+			}
+			lock->trx->mutex_lock();
 			lock_rec_set_nth_bit(lock, heap_no);
+			lock->trx->mutex_unlock();
+			if (caller_owns_trx_mutex) {
+				trx->mutex_lock();
+			}
 			return;
 		}
 	}
@@ -1820,11 +1829,11 @@ lock_rec_lock(
       Note that we don't own the trx mutex.
     */
     if (!impl)
-      lock_rec_create(
+      lock_rec_create_low(
 #ifdef WITH_WSREP
-         NULL, NULL,
+        nullptr, nullptr,
 #endif
-        mode, block, heap_no, index, trx, false);
+        mode, id, block->frame, heap_no, index, trx, false);
 
     return DB_SUCCESS_LOCKED_REC;
   }
@@ -2090,26 +2099,22 @@ static void lock_grant(lock_t *lock)
 Cancels a waiting record lock request and releases the waiting transaction
 that requested it. NOTE: does NOT check if waiting lock requests behind this
 one can now be granted! */
-static
-void
-lock_rec_cancel(
-/*============*/
-	lock_t*	lock)	/*!< in: waiting record lock request */
+static void lock_rec_cancel(lock_t *lock)
 {
-	/* Reset the bit (there can be only one set bit) in the lock bitmap */
-	lock_rec_reset_nth_bit(lock, lock_rec_find_set_bit(lock));
+  trx_t *trx= lock->trx;
+  mysql_mutex_lock(&lock_sys.wait_mutex);
+  trx->mutex_lock();
 
-	/* Reset the wait flag and the back pointer to lock in trx */
+  /* Reset the bit (there can be only one set bit) in the lock bitmap */
+  lock_rec_reset_nth_bit(lock, lock_rec_find_set_bit(lock));
 
-	mysql_mutex_lock(&lock_sys.wait_mutex);
-	lock_reset_lock_and_trx_wait(lock);
+  /* Reset the wait flag and the back pointer to lock in trx */
+  lock_reset_lock_and_trx_wait(lock);
 
-	/* The following releases the trx from lock wait */
-	trx_t *trx = lock->trx;
-	trx->mutex_lock();
-	lock_wait_end(trx);
-	mysql_mutex_unlock(&lock_sys.wait_mutex);
-	trx->mutex_unlock();
+  /* The following releases the trx from lock wait */
+  lock_wait_end(trx);
+  mysql_mutex_unlock(&lock_sys.wait_mutex);
+  trx->mutex_unlock();
 }
 
 /** Remove a record lock request, waiting or granted, from the queue and
@@ -2126,8 +2131,11 @@ static void lock_rec_dequeue_from_page(lock_t *in_lock, bool owns_wait_mutex)
 
 	const page_id_t page_id{in_lock->un_member.rec_lock.page_id};
 	lock_sys.assert_locked(page_id);
+	ut_ad(lock_sys.is_writer() || in_lock->trx->mutex_is_owner());
 
+	ut_d(auto old_n_locks=)
 	in_lock->index->table->n_rec_locks--;
+	ut_ad(old_n_locks);
 
 	hash_table_t* lock_hash = lock_hash_get(in_lock->type_mode);
 	const ulint rec_fold = page_id.fold();
@@ -2185,12 +2193,14 @@ lock_rec_discard(
   ut_ad(!in_lock->is_table());
   lock_sys.assert_locked(in_lock->un_member.rec_lock.page_id);
 
-  trx_t *trx= in_lock->trx;
-  in_lock->index->table->n_rec_locks--;
-
   HASH_DELETE(lock_t, hash, lock_hash_get(in_lock->type_mode),
               in_lock->un_member.rec_lock.page_id.fold(), in_lock);
+
+  trx_t *trx= in_lock->trx;
   trx->mutex_lock();
+  ut_d(auto old_locks=)
+  in_lock->index->table->n_rec_locks--;
+  ut_ad(old_locks);
   UT_LIST_REMOVE(trx->lock.trx_locks, in_lock);
   trx->mutex_unlock();
 
@@ -2242,10 +2252,17 @@ lock_rec_reset_and_release_wait_low(
 {
   for (lock_t *lock= lock_rec_get_first(hash, id, heap_no); lock;
        lock= lock_rec_get_next(heap_no, lock))
+  {
     if (lock->is_waiting())
       lock_rec_cancel(lock);
     else
+    {
+      trx_t *lock_trx= lock->trx;
+      lock_trx->mutex_lock();
       lock_rec_reset_nth_bit(lock, heap_no);
+      lock_trx->mutex_unlock();
+    }
+  }
 }
 
 /*************************************************************//**
@@ -2288,7 +2305,6 @@ lock_rec_inherit_to_gap(
 	ulint			heap_no)	/*!< in: heap_no of the
 						donating record */
 {
-	lock_sys.assert_locked(id);
 	lock_sys.assert_locked(heir);
 
 	/* At READ UNCOMMITTED or READ COMMITTED isolation level,
@@ -2300,15 +2316,15 @@ lock_rec_inherit_to_gap(
 	for (lock_t* lock= lock_rec_get_first(&lock_sys.rec_hash, id, heap_no);
 	     lock != NULL;
 	     lock = lock_rec_get_next(heap_no, lock)) {
-
+		trx_t* lock_trx = lock->trx;
 		if (!lock->is_insert_intention()
-		    && (lock->trx->isolation_level > TRX_ISO_READ_COMMITTED
+		    && (lock_trx->isolation_level > TRX_ISO_READ_COMMITTED
 			|| lock->mode() !=
-			(lock->trx->duplicates ? LOCK_S : LOCK_X))) {
+			(lock_trx->duplicates ? LOCK_S : LOCK_X))) {
 			lock_rec_add_to_queue(LOCK_GAP | lock->mode(),
 					      heir, heir_page,
 					      heir_heap_no,
-					      lock->index, lock->trx, false);
+					      lock->index, lock_trx, false);
 		}
 	}
 }
@@ -2374,21 +2390,23 @@ lock_rec_move_low(
 	     lock_rec_get_first(lock_hash, donator_id, donator_heap_no);
 	     lock != NULL;
 	     lock = lock_rec_get_next(donator_heap_no, lock)) {
-
-		lock_rec_reset_nth_bit(lock, donator_heap_no);
-
 		const auto type_mode = lock->type_mode;
 		if (type_mode & LOCK_WAIT) {
 			ut_ad(lock->trx->lock.wait_lock == lock);
 			lock->type_mode &= ~LOCK_WAIT;
 		}
 
+		trx_t* lock_trx = lock->trx;
+		lock_trx->mutex_lock();
+		lock_rec_reset_nth_bit(lock, donator_heap_no);
+
 		/* Note that we FIRST reset the bit, and then set the lock:
 		the function works also if donator_id == receiver_id */
 
 		lock_rec_add_to_queue(type_mode, receiver_id, receiver.frame,
 				      receiver_heap_no,
-				      lock->index, lock->trx, false);
+				      lock->index, lock_trx, true);
+		lock_trx->mutex_unlock();
 	}
 
 	ut_ad(!lock_rec_get_first(&lock_sys.rec_hash,
@@ -2555,6 +2573,9 @@ lock_move_reorganize_page(
           rec2= page_rec_get_next_low(rec2, FALSE);
         }
 
+        trx_t *lock_trx= lock->trx;
+        lock_trx->mutex_lock();
+
         /* Clear the bit in old_lock. */
         if (old_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, old_heap_no))
@@ -2564,8 +2585,10 @@ lock_move_reorganize_page(
           /* NOTE that the old lock bitmap could be too
           small for the new heap number! */
           lock_rec_add_to_queue(lock->type_mode, id, block->frame, new_heap_no,
-                                lock->index, lock->trx, FALSE);
+                                lock->index, lock_trx, true);
         }
+
+        lock_trx->mutex_unlock();
 
         if (new_heap_no == PAGE_HEAP_NO_SUPREMUM)
         {
@@ -2670,6 +2693,9 @@ lock_move_rec_list_end(
           rec2= page_rec_get_next_low(rec2, FALSE);
         }
 
+        trx_t *lock_trx= lock->trx;
+        lock_trx->mutex_lock();
+
         if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
@@ -2677,13 +2703,15 @@ lock_move_rec_list_end(
 
           if (type_mode & LOCK_WAIT)
           {
-            ut_ad(lock->trx->lock.wait_lock == lock);
+            ut_ad(lock_trx->lock.wait_lock == lock);
             lock->type_mode&= ~LOCK_WAIT;
           }
 
           lock_rec_add_to_queue(type_mode, new_id, new_block->frame,
-                                rec2_heap_no, lock->index, lock->trx, false);
+                                rec2_heap_no, lock->index, lock_trx, true);
         }
+
+        lock_trx->mutex_unlock();
       }
     }
   }
@@ -2777,6 +2805,9 @@ lock_move_rec_list_start(
           rec2= page_rec_get_next_low(rec2, FALSE);
         }
 
+        trx_t *lock_trx= lock->trx;
+        lock_trx->mutex_lock();
+
         if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
@@ -2784,13 +2815,15 @@ lock_move_rec_list_start(
 
           if (type_mode & LOCK_WAIT)
           {
-            ut_ad(lock->trx->lock.wait_lock == lock);
+            ut_ad(lock_trx->lock.wait_lock == lock);
             lock->type_mode&= ~LOCK_WAIT;
           }
 
           lock_rec_add_to_queue(type_mode, new_id, new_block->frame,
-                                rec2_heap_no, lock->index, lock->trx, false);
+                                rec2_heap_no, lock->index, lock_trx, true);
         }
+
+        lock_trx->mutex_unlock();
       }
 
 #ifdef UNIV_DEBUG
@@ -2834,7 +2867,7 @@ lock_rtr_move_rec_list(
     LockMultiGuard g{id, new_id};
 
     for (lock_t *lock= lock_sys.get_first(id); lock;
-	 lock= lock_rec_get_next_on_page(lock))
+         lock= lock_rec_get_next_on_page(lock))
     {
       const rec_t *rec1;
       const rec_t *rec2;
@@ -2846,40 +2879,45 @@ lock_rtr_move_rec_list(
       for (ulint moved= 0; moved < num_move; moved++)
       {
         ulint rec1_heap_no;
-	ulint rec2_heap_no;
+        ulint rec2_heap_no;
 
-	rec1= rec_move[moved].old_rec;
-	rec2= rec_move[moved].new_rec;
-	ut_ad(!page_rec_is_metadata(rec1));
-	ut_ad(!page_rec_is_metadata(rec2));
+        rec1= rec_move[moved].old_rec;
+        rec2= rec_move[moved].new_rec;
+        ut_ad(!page_rec_is_metadata(rec1));
+        ut_ad(!page_rec_is_metadata(rec2));
 
-	if (comp)
+        if (comp)
         {
           rec1_heap_no= rec_get_heap_no_new(rec1);
-	  rec2_heap_no= rec_get_heap_no_new(rec2);
-	}
-	else
+          rec2_heap_no= rec_get_heap_no_new(rec2);
+        }
+        else
         {
           rec1_heap_no= rec_get_heap_no_old(rec1);
-	  rec2_heap_no= rec_get_heap_no_old(rec2);
+          rec2_heap_no= rec_get_heap_no_old(rec2);
 
-	  ut_ad(!memcmp(rec1, rec2, rec_get_data_size_old(rec2)));
-	}
+          ut_ad(!memcmp(rec1, rec2, rec_get_data_size_old(rec2)));
+        }
 
-	if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
-	    lock_rec_reset_nth_bit(lock, rec1_heap_no))
+        trx_t *lock_trx= lock->trx;
+        lock_trx->mutex_lock();
+
+        if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+            lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           if (type_mode & LOCK_WAIT)
           {
-            ut_ad(lock->trx->lock.wait_lock == lock);
+            ut_ad(lock_trx->lock.wait_lock == lock);
             lock->type_mode&= ~LOCK_WAIT;
           }
 
           lock_rec_add_to_queue(type_mode, new_id, new_block->frame,
-                                rec2_heap_no, lock->index, lock->trx, false);
+                                rec2_heap_no, lock->index, lock_trx, true);
 
-	  rec_move[moved].moved= true;
-	}
+          rec_move[moved].moved= true;
+        }
+
+        lock_trx->mutex_unlock();
       }
     }
   }
@@ -3884,7 +3922,9 @@ lock_rec_unlock(
 
 released:
 	ut_a(!lock->is_waiting());
+	trx->mutex_lock();
 	lock_rec_reset_nth_bit(lock, heap_no);
+	trx->mutex_unlock();
 
 	/* Check if we can now grant waiting lock requests */
 

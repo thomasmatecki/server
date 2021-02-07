@@ -92,6 +92,7 @@ lock_rec_set_nth_bit(
 #if defined __GNUC__ && !defined __clang__ && __GNUC__ < 6
 # pragma GCC diagnostic pop
 #endif
+	ut_ad(lock_sys.is_writer() || lock->trx->mutex_is_owner());
 	lock->trx->lock.n_rec_locks++;
 }
 

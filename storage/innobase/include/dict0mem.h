@@ -2311,14 +2311,16 @@ public:
 
   /** Count of the number of record locks on this table. We use this to
   determine whether we can evict the table from the dictionary cache.
-  Protected by lock_sys.assert_locked(page_id). */
+  Protected by lock_sys.assert_locked(), or
+  lock_sys.assert_locked(page_id) && trx->mutex_is_owner().
+  @see trx_lock_t::trx_locks */
   uint32_t n_rec_locks;
 
 private:
-	/** Count of how many handles are opened to this table. Dropping of the
-	table is NOT allowed until this count gets to zero. MySQL does NOT
-	itself check the number of open handles at DROP. */
-	Atomic_counter<uint32_t>		n_ref_count;
+  /** Count of how many handles are opened to this table. Dropping of the
+  table is NOT allowed until this count gets to zero. MySQL does NOT
+  itself check the number of open handles at DROP. */
+  Atomic_counter<uint32_t> n_ref_count;
 public:
   /** List of locks on the table. Protected by lock_sys.assert_locked(lock). */
   table_lock_list_t locks;

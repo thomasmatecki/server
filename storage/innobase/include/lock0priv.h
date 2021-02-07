@@ -482,6 +482,7 @@ inline byte lock_rec_reset_nth_bit(lock_t* lock, ulint i)
 {
 	ut_ad(!lock->is_table());
 	lock_sys.assert_locked(lock->un_member.rec_lock.page_id);
+	ut_ad(lock_sys.is_writer() || lock->trx->mutex_is_owner());
 	ut_ad(i < lock->un_member.rec_lock.n_bits);
 
 	byte*	b = reinterpret_cast<byte*>(&lock[1]) + (i >> 3);
