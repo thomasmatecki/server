@@ -29,8 +29,8 @@ my @defaults_options;   #  Leading --no-defaults, --defaults-file, etc.
 $opt_example       = 0;
 $opt_help          = 0;
 $opt_log           = undef();
-$opt_mysqladmin    = "@bindir@/mysqladmin";
-$opt_mysqld        = "@sbindir@/mysqld";
+$opt_mysqladmin    = "@bindir@/mariadb-admin";
+$opt_mysqld        = "@sbindir@/mariadbd";
 $opt_no_log        = 0;
 $opt_password      = undef();
 $opt_tcp_ip        = 0;
@@ -728,7 +728,7 @@ sub example
 
 [mysqld_multi]
 mysqld     = @bindir@/mysqld_safe
-mysqladmin = @bindir@/mysqladmin
+mysqladmin = @bindir@/mariadb-admin
 user       = multi_admin
 password   = my_password
 
@@ -743,7 +743,7 @@ user       = unix_user1
 [mysqld3]
 mysqld     = /path/to/mysqld_safe
 ledir      = /path/to/mysqld-binary/
-mysqladmin = /path/to/mysqladmin
+mysqladmin = /path/to/mariadb-admin
 socket     = /tmp/mysql.sock3
 port       = 3308
 pid-file   = @localstatedir@3/hostname.pid3
