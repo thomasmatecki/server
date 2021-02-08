@@ -3988,7 +3988,8 @@ void lock_release(trx_t *trx)
   assert that the current transaction be active. */
   DBUG_ASSERT(trx->state == TRX_STATE_COMMITTED_IN_MEMORY);
   DBUG_ASSERT(!trx->is_referenced());
-  LockMutexGuard g{SRW_LOCK_CALL};
+
+  lock_sys.rd_lock(SRW_LOCK_CALL);
 
   for (lock_t *lock= UT_LIST_GET_LAST(trx->lock.trx_locks); lock;
        lock= UT_LIST_GET_LAST(trx->lock.trx_locks))
@@ -4000,7 +4001,11 @@ void lock_release(trx_t *trx)
       ut_ad(lock->mode() != LOCK_X ||
             lock->index->table->id >= DICT_HDR_FIRST_ID ||
             trx->dict_operation);
+      const auto l= lock_sys.lock_page_latch(lock->un_member.rec_lock.page_id);
+      trx->mutex_lock();
       lock_rec_dequeue_from_page(lock, false);
+      trx->mutex_unlock();
+      lock_sys.unlock_page_latch(l);
     }
     else
     {
@@ -4009,20 +4014,23 @@ void lock_release(trx_t *trx)
       ut_ad(table->id >= DICT_HDR_FIRST_ID ||
             (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
             trx->dict_operation);
+      const auto l= lock_sys.lock_table_latch(table->id);
       lock_table_dequeue(lock, false);
+      lock_sys.unlock_table_latch(l);
     }
 
     if (count == 1000)
     {
-      /* Release the  mutex for a while, so that we do not monopolize it */
-      lock_sys.wr_unlock();
+      /* Release the latch for a while, so that we do not monopolize it */
+      lock_sys.rd_unlock();
       count= 0;
-      lock_sys.wr_lock(SRW_LOCK_CALL);
+      lock_sys.rd_lock(SRW_LOCK_CALL);
     }
 
     ++count;
   }
 
+  lock_sys.rd_unlock();
   trx->lock.was_chosen_as_deadlock_victim= false;
   trx->lock.n_rec_locks= 0;
 }
