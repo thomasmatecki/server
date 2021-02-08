@@ -1340,6 +1340,7 @@ static void lock_table_create_wsrep(lock_t *c_lock, lock_t *lock, dict_table_t *
 
   trx->mutex_unlock();
   mysql_mutex_lock(&lock_sys.wait_mutex);
+  trx->mutex_lock();
   c_trx->mutex_lock();
 
   if (c_trx->lock.wait_thr)
@@ -1353,14 +1354,11 @@ static void lock_table_create_wsrep(lock_t *c_lock, lock_t *lock, dict_table_t *
       wsrep_print_wait_locks(c_lock);
     }
 
-    /* The lock release will call lock_grant(),
-    which would acquire trx->mutex again. */
     lock_cancel_waiting_and_release(c_trx->lock.wait_lock);
   }
 
   mysql_mutex_unlock(&lock_sys.wait_mutex);
   c_trx->mutex_unlock();
-  trx->mutex_lock();
 }
 #endif
 
@@ -2206,19 +2204,23 @@ lock_rec_discard(
   ut_ad(!in_lock->is_table());
   lock_sys.assert_locked(in_lock->un_member.rec_lock.page_id);
 
-  HASH_DELETE(lock_t, hash, lock_hash_get(in_lock->type_mode),
-              in_lock->un_member.rec_lock.page_id.fold(), in_lock);
-
   trx_t *trx= in_lock->trx;
-  trx->mutex_lock();
-  ut_d(auto old_locks=)
-  in_lock->index->table->n_rec_locks--;
-  ut_ad(old_locks);
-  UT_LIST_REMOVE(trx->lock.trx_locks, in_lock);
-  trx->mutex_unlock();
+  if (trx->state == TRX_STATE_COMMITTED_IN_MEMORY)
+    return;
 
-  MONITOR_INC(MONITOR_RECLOCK_REMOVED);
-  MONITOR_DEC(MONITOR_NUM_RECLOCK);
+  trx->mutex_lock();
+  if (trx->state != TRX_STATE_COMMITTED_IN_MEMORY)
+  {
+    HASH_DELETE(lock_t, hash, lock_hash_get(in_lock->type_mode),
+                in_lock->un_member.rec_lock.page_id.fold(), in_lock);
+    ut_d(auto old_locks=)
+    in_lock->index->table->n_rec_locks--;
+    ut_ad(old_locks);
+    UT_LIST_REMOVE(trx->lock.trx_locks, in_lock);
+    MONITOR_INC(MONITOR_RECLOCK_REMOVED);
+    MONITOR_DEC(MONITOR_NUM_RECLOCK);
+  }
+  trx->mutex_unlock();
 }
 
 /*************************************************************//**
@@ -2232,7 +2234,8 @@ static void lock_rec_free_all_from_discard_page_low(const page_id_t id,
 
   while (lock)
   {
-    ut_ad(lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
+    ut_ad(lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY ||
+          lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
     ut_ad(!lock->is_waiting());
     lock_t *next_lock= lock_rec_get_next_on_page(lock);
     lock_rec_discard(lock);
@@ -2562,6 +2565,7 @@ lock_move_reorganize_page(
       were temporarily stored on the infimum */
       const rec_t *rec1= page_get_infimum_rec(block->frame);
       const rec_t *rec2= page_get_infimum_rec(oblock->frame);
+      ut_d(bool committed= false);
 
       /* Set locks according to old locks */
       for (;;)
@@ -2593,9 +2597,10 @@ lock_move_reorganize_page(
         lock_trx->mutex_lock();
 
         /* Clear the bit in old_lock. */
-        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
-            old_heap_no < lock->un_member.rec_lock.n_bits &&
-            lock_rec_reset_nth_bit(lock, old_heap_no))
+        if (lock_trx->state == TRX_STATE_COMMITTED_IN_MEMORY)
+          ut_d(committed= true);
+        else if (old_heap_no < lock->un_member.rec_lock.n_bits &&
+                 lock_rec_reset_nth_bit(lock, old_heap_no))
         {
           ut_ad(!page_rec_is_metadata(orec));
 
@@ -2614,7 +2619,7 @@ lock_move_reorganize_page(
         }
       }
 
-      ut_ad(lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
+      ut_ad(committed || lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
     }
   }
 
@@ -2781,6 +2786,7 @@ lock_move_rec_list_start(
       const rec_t *rec1;
       const rec_t *rec2;
       const auto type_mode= lock->type_mode;
+      ut_d(bool committed= false);
 
       if (comp)
       {
@@ -2826,9 +2832,10 @@ lock_move_rec_list_start(
         trx_t *lock_trx= lock->trx;
         lock_trx->mutex_lock();
 
-        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
-            rec1_heap_no < lock->un_member.rec_lock.n_bits &&
-            lock_rec_reset_nth_bit(lock, rec1_heap_no))
+        if (lock_trx->state == TRX_STATE_COMMITTED_IN_MEMORY)
+          ut_d(committed= true);
+        else if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+                 lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           ut_ad(!page_rec_is_metadata(prev));
 
@@ -2846,7 +2853,7 @@ lock_move_rec_list_start(
       }
 
 #ifdef UNIV_DEBUG
-      if (page_rec_is_supremum(rec))
+      if (!committed && page_rec_is_supremum(rec))
         for (auto i= lock_rec_get_n_bits(lock); --i > PAGE_HEAP_NO_USER_LOW; )
           ut_ad(!lock_rec_get_nth_bit(lock, i));
 #endif /* UNIV_DEBUG */
@@ -4679,9 +4686,14 @@ loop:
 
 	ut_ad(!trx_is_ac_nl_ro(lock->trx));
 
-	/* Only validate the record queues when this thread is not
-	holding a tablespace latch. */
-	if (!latched)
+	if (latched) {
+		/* Only validate the record queues when this thread is not
+		holding a tablespace latch. */
+	} else if (lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY) {
+		/* After a transaction is commited, its locks that
+		refer to discarded pages will continue to exist until
+		lock_release() is finished. */
+	} else
 	for (i = nth_bit; i < lock_rec_get_n_bits(lock); i++) {
 
 		if (i == PAGE_HEAP_NO_SUPREMUM
@@ -4830,7 +4842,8 @@ static void lock_validate()
       page_id_t limit{0, 0};
       while (const lock_t *lock= lock_rec_validate(i, &limit))
       {
-        if (lock_rec_find_set_bit(lock) == ULINT_UNDEFINED)
+        if (lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY ||
+            lock_rec_find_set_bit(lock) == ULINT_UNDEFINED)
           /* The lock bitmap is empty; ignore it. */
           continue;
         pages.insert(lock->un_member.rec_lock.page_id);
@@ -6103,7 +6116,8 @@ inline trx_t* DeadlockChecker::search()
 			continue;
 		}
 
-		if (!lock_has_to_wait(m_wait_lock, lock)) {
+		if (lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY
+		    || !lock_has_to_wait(m_wait_lock, lock)) {
 			/* No conflict, next lock */
 			lock = get_next_lock(lock, heap_no);
 			continue;

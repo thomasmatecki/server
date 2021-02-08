@@ -689,9 +689,10 @@ public:
   @return parameter to unlock_table_latch() that the caller must invoke */
   inline unsigned lock_table_latch(table_id_t id);
   /** Get a page lock mutex.
-  @return parameter to lock_page_latch() and unlock_page_latch() */
+  @return parameter to lock_page_latch() and unlock_page_latch().
+  FIXME: This must be compatible with hash_table_t::calc_hash()! */
   static unsigned get_page_latch(page_id_t id)
-  { return (id.space() + id.page_no()) % LATCHES; }
+  { return (id.fold()) % LATCHES; }
   /** Acquire a page lock mutex. */
   inline void lock_page_latch(unsigned shard);
 

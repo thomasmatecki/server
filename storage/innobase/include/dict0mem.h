@@ -2305,10 +2305,10 @@ public:
 
   /** Count of the number of record locks on this table. We use this to
   determine whether we can evict the table from the dictionary cache.
-  Protected by lock_sys.assert_locked(), or
-  lock_sys.assert_locked(page_id) && trx->mutex_is_owner().
+  Modified when lock_sys.is_writer(), or
+  lock_sys.assert_locked(page_id) and trx->mutex_is_owner() hold.
   @see trx_lock_t::trx_locks */
-  uint32_t n_rec_locks;
+  Atomic_counter<uint32_t> n_rec_locks;
 
 private:
   /** Count of how many handles are opened to this table. Dropping of the
