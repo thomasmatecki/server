@@ -529,9 +529,9 @@ lock_prdt_insert_check_and_lock(
       if (c_lock)
       {
         rtr_mbr_t *mbr= prdt_get_mbr_from_prdt(prdt);
+        trx->mutex_lock();
         /* Allocate MBR on the lock heap */
         lock_init_prdt_from_mbr(prdt, mbr, 0, trx->lock.lock_heap);
-        trx->mutex_lock();
         err= lock_rec_enqueue_waiting(
 #ifdef WITH_WSREP
           c_lock,
@@ -682,8 +682,7 @@ lock_init_prdt_from_mbr(
 	memset(prdt, 0, sizeof(*prdt));
 
 	if (heap != NULL) {
-		prdt->data = mem_heap_alloc(heap, sizeof(*mbr));
-		memcpy(prdt->data, mbr, sizeof(*mbr));
+		prdt->data = mem_heap_dup(heap, mbr, sizeof *mbr);
 	} else {
 		prdt->data = static_cast<void*>(mbr);
 	}

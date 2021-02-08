@@ -2000,9 +2000,11 @@ retry_page_get:
 
 		{
 			LockGuard g{block->page.id()};
+			trx->mutex_lock();
 			lock_init_prdt_from_mbr(
 				&prdt, &cursor->rtr_info->mbr, mode,
 				trx->lock.lock_heap);
+			trx->mutex_unlock();
 		}
 
 		if (rw_latch == RW_NO_LATCH && height != 0) {
@@ -3241,8 +3243,7 @@ btr_cur_ins_lock_and_undo(
 			/* Use on stack MBR variable to test if a lock is
 			needed. If so, the predicate (MBR) will be allocated
 			from lock heap in lock_prdt_insert_check_and_lock() */
-			lock_init_prdt_from_mbr(
-				&prdt, &mbr, 0, NULL);
+			lock_init_prdt_from_mbr(&prdt, &mbr, 0, nullptr);
 
 			if (dberr_t err = lock_prdt_insert_check_and_lock(
 				    rec, btr_cur_get_block(cursor),

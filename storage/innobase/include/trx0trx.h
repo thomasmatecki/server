@@ -471,11 +471,12 @@ struct trx_lock_t
 	/** Pre-allocated table locks */
 	ib_lock_t	table_pool[8];
 
-	mem_heap_t*	lock_heap;	/*!< memory heap for trx_locks;
-					protected by lock_sys.latch */
+  /** Memory heap for trx_locks. Protected by lock_sys.assert_locked()
+  and lock_sys.is_writer() || trx->mutex_is_owner(). */
+  mem_heap_t *lock_heap;
 
   /** Locks held by the transaction. Protected by lock_sys.assert_locked()
-  or the combination of lock_sys.assert_locked(*lock) and trx->mutex.
+  and lock_sys.is_writer() || trx->mutex_is_owner().
   (If lock_sys.latch is only held in shared mode, then the modification
   must be protected by trx->mutex.) */
   trx_lock_list_t trx_locks;
