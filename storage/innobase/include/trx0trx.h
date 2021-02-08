@@ -430,9 +430,10 @@ struct trx_lock_t
   /** lock wait start time, protected only by lock_sys.wait_mutex */
   my_hrtime_t suspend_time;
 
-	ib_uint64_t	deadlock_mark;	/*!< A mark field that is initialized
-					to and checked against lock_mark_counter
-					by lock_deadlock_recursive(). */
+  /** DeadlockChecker::search() uses this to keep track of visited locks.
+  Protected by lock_sys.is_writer(). */
+  uint64_t deadlock_mark;
+
 #ifdef WITH_WSREP
   /** 2=high priority wsrep thread has marked this trx to abort;
   1=another transaction chose this as a victim in deadlock resolution. */
