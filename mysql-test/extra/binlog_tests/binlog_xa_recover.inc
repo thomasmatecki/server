@@ -171,36 +171,37 @@ INSERT INTO t1 VALUES (13, NULL);
 --let $binlog_start= 4
 --source include/show_binlog_events.inc
 
-SET DEBUG_SYNC= "now SIGNAL con10_cont";
-connection con10;
-reap;
-connection default;
-
 # We need to sync the test case with the background processing of the
 # commit checkpoint, otherwise we get nondeterministic results.
 SET @old_dbug= @@global.DEBUG_DBUG;
 SET GLOBAL debug_dbug="+d,binlog_background_checkpoint_processed";
+
+SET DEBUG_SYNC= "now SIGNAL con10_cont";
+connection con10;
+reap;
+connection default;
 SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
+
 SET DEBUG_SYNC= "now SIGNAL con12_cont";
 connection con12;
 reap;
 connection default;
-SET GLOBAL debug_dbug= @old_dbug;
+SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
 
 SET DEBUG_SYNC= "now SIGNAL con11_cont";
 connection con11;
 reap;
-
 connection default;
+SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
+SET GLOBAL debug_dbug= @old_dbug;
+SET DEBUG_SYNC= "RESET";
+
 # Wait for the last (master-bin.000004) binlog checkpoint to appear.
 --let $wait_for_all= 0
 --let $show_statement= SHOW BINLOG EVENTS IN "master-bin.000004"
 --let $field= Info
 --let $condition= = "master-bin.000004"
 --source include/wait_show_condition.inc
-
---echo Checking that master-bin.000004 is the last binlog checkpoint
---source include/show_binlog_events.inc
 
 --echo Now crash the server
 # It is not too easy to test XA recovery, as it runs early during server
