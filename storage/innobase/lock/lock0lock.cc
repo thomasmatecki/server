@@ -2395,6 +2395,7 @@ lock_rec_move_low(
 	ut_ad(!lock_rec_get_first(lock_hash, receiver_id, receiver_heap_no)
 	      || lock_hash == &lock_sys.prdt_hash
 	      || lock_hash == &lock_sys.prdt_page_hash);
+	ut_d(bool committed = false);
 
 	for (lock_t *lock =
 	     lock_rec_get_first(lock_hash, donator_id, donator_heap_no);
@@ -2408,7 +2409,9 @@ lock_rec_move_low(
 
 		trx_t* lock_trx = lock->trx;
 		lock_trx->mutex_lock();
-		if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY) {
+		if (lock_trx->state == TRX_STATE_COMMITTED_IN_MEMORY) {
+			ut_d(committed = true);
+		} else {
 			lock_rec_reset_nth_bit(lock, donator_heap_no);
 
 			/* Note that we FIRST reset the bit, and then
@@ -2422,8 +2425,8 @@ lock_rec_move_low(
 		lock_trx->mutex_unlock();
 	}
 
-	ut_ad(!lock_rec_get_first(&lock_sys.rec_hash,
-				  donator_id, donator_heap_no));
+	ut_ad(committed || !lock_rec_get_first(&lock_sys.rec_hash,
+					       donator_id, donator_heap_no));
 }
 
 /** Move all the granted locks to the front of the given lock list.
