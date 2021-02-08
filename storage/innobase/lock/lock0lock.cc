@@ -4009,7 +4009,7 @@ void lock_release(trx_t *trx)
     }
     else
     {
-      ut_d(dict_table_t *table= lock->un_member.tab_lock.table);
+      dict_table_t *table= lock->un_member.tab_lock.table;
       ut_ad(!table->is_temporary());
       ut_ad(table->id >= DICT_HDR_FIRST_ID ||
             (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
