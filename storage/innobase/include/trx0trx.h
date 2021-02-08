@@ -444,12 +444,6 @@ struct trx_lock_t
   resolution. Protected by lock_sys.latch and lock_sys.wait_mutex. */
   bool was_chosen_as_deadlock_victim;
 #endif
-  /** Whether the transaction is being rolled back either via deadlock
-  detection or timeout. The caller has to acquire the trx_t::mutex in
-  order to cancel the locks. In lock_trx_table_locks_remove() we must
-  avoid reacquiring the trx_t::mutex to prevent recursive
-  deadlocks. Protected by both lock_sys.latch and trx_t::mutex. */
-  bool cancel;
 
   /** Next available rec_pool[] entry */
   byte rec_cached;

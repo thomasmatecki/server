@@ -2086,8 +2086,6 @@ static void lock_wait_end(trx_t *trx)
 /** Grant a waiting lock request and release the waiting transaction. */
 static void lock_grant(lock_t *lock)
 {
-  lock_sys.assert_locked(*lock);
-  mysql_mutex_assert_owner(&lock_sys.wait_mutex);
   lock_reset_lock_and_trx_wait(lock);
   trx_t *trx= lock->trx;
   trx->mutex_lock();
@@ -3414,20 +3412,20 @@ lock_table_remove_autoinc_lock(
 	lock_t*	lock,	/*!< in: table lock */
 	trx_t*	trx)	/*!< in/out: transaction that owns the lock */
 {
-	lock_t*	autoinc_lock;
-	lint	i = ib_vector_size(trx->autoinc_locks) - 1;
-
 	ut_ad(lock->type_mode == (LOCK_AUTO_INC | LOCK_TABLE));
 	lock_sys.assert_locked(*lock->un_member.tab_lock.table);
-	ut_ad(!ib_vector_is_empty(trx->autoinc_locks));
+	ut_ad(trx->mutex_is_owner());
+
+	auto s = ib_vector_size(trx->autoinc_locks);
+	ut_ad(s);
 
 	/* With stored functions and procedures the user may drop
 	a table within the same "statement". This special case has
 	to be handled by deleting only those AUTOINC locks that were
 	held by the table being dropped. */
 
-	autoinc_lock = *static_cast<lock_t**>(
-		ib_vector_get(trx->autoinc_locks, i));
+	lock_t*	autoinc_lock = *static_cast<lock_t**>(
+		ib_vector_get(trx->autoinc_locks, --s));
 
 	/* This is the default fast case. */
 
@@ -3439,13 +3437,13 @@ lock_table_remove_autoinc_lock(
 
 		/* Handle freeing the locks from within the stack. */
 
-		while (--i >= 0) {
+		while (s) {
 			autoinc_lock = *static_cast<lock_t**>(
-				ib_vector_get(trx->autoinc_locks, i));
+				ib_vector_get(trx->autoinc_locks, --s));
 
 			if (autoinc_lock == lock) {
 				void*	null_var = NULL;
-				ib_vector_set(trx->autoinc_locks, i, &null_var);
+				ib_vector_set(trx->autoinc_locks, s, &null_var);
 				return;
 			}
 		}
@@ -3474,7 +3472,7 @@ lock_table_remove_low(
 	trx = lock->trx;
 	table = lock->un_member.tab_lock.table;
 	lock_sys.assert_locked(*table);
-	ut_ad(lock_sys.is_writer() || trx->mutex_is_owner());
+	trx->mutex_lock();
 
 	/* Remove the table from the transaction's AUTOINC vector, if
 	the lock that is being released is an AUTOINC lock. */
@@ -3508,6 +3506,7 @@ lock_table_remove_low(
 
 	UT_LIST_REMOVE(trx->lock.trx_locks, lock);
 	ut_list_remove(table->locks, lock, TableLockGetNode());
+	trx->mutex_unlock();
 
 	MONITOR_INC(MONITOR_TABLELOCK_REMOVED);
 	MONITOR_DEC(MONITOR_NUM_TABLELOCK);
@@ -3824,15 +3823,18 @@ void lock_table_x_unlock(dict_table_t *table, trx_t *trx)
 
   for (lock_t*& lock : trx->lock.table_locks)
   {
-    if (!lock || lock->trx != trx)
+    ut_ad(!lock || lock->trx == trx);
+    if (!lock)
       continue;
     ut_ad(!lock->is_waiting());
-    if (lock->type_mode != (LOCK_TABLE | LOCK_X))
+    if (lock->type_mode != (LOCK_TABLE | LOCK_X) ||
+        lock->un_member.tab_lock.table != table)
       continue;
-    {
-      LockMutexGuard g{SRW_LOCK_CALL};
-      lock_table_dequeue(lock, false);
-    }
+    lock_sys.rd_lock(SRW_LOCK_CALL);
+    const auto l= lock_sys.lock_table_latch(table->id);
+    lock_table_dequeue(lock, false);
+    lock_sys.rd_unlock();
+    lock_sys.unlock_table_latch(l);
     lock= nullptr;
     return;
   }
@@ -4037,13 +4039,7 @@ lock_trx_table_locks_remove(
 
 	ut_ad(lock_to_remove->is_table());
 	lock_sys.assert_locked(*lock_to_remove->un_member.tab_lock.table);
-
-	/* It is safe to read this because we are holding lock_sys.latch */
-	const bool have_mutex = trx->lock.cancel;
-	if (!have_mutex) {
-		trx->mutex_lock();
-	}
-	ut_ad(trx->mutex_is_owner());
+	trx->mutex_lock();
 
 	for (lock_list::iterator it = trx->lock.table_locks.begin(),
              end = trx->lock.table_locks.end(); it != end; ++it) {
@@ -4055,11 +4051,7 @@ lock_trx_table_locks_remove(
 
 		if (lock == lock_to_remove) {
 			*it = NULL;
-
-			if (!have_mutex) {
-				trx->mutex_unlock();
-			}
-
+			trx->mutex_unlock();
 			return;
 		}
 	}
@@ -5570,14 +5562,16 @@ void lock_cancel_waiting_and_release(lock_t *lock)
   ut_ad(trx->state == TRX_STATE_ACTIVE);
   ut_ad(trx->mutex_is_owner());
 
-  trx->lock.cancel= true;
-
   if (!lock->is_table())
+  {
+    trx->mutex_unlock();
     lock_rec_dequeue_from_page(lock, true);
+  }
   else
   {
     if (trx->autoinc_locks)
       lock_release_autoinc_locks(trx, true);
+    trx->mutex_unlock();
     lock_table_dequeue(lock, true);
     /* Remove the lock from table lock vector too. */
     lock_trx_table_locks_remove(lock);
@@ -5586,9 +5580,8 @@ void lock_cancel_waiting_and_release(lock_t *lock)
   /* Reset the wait flag and the back pointer to lock in trx. */
   lock_reset_lock_and_trx_wait(lock);
 
+  trx->mutex_lock();
   lock_wait_end(trx);
-
-  trx->lock.cancel= false;
 }
 
 /*********************************************************************//**
