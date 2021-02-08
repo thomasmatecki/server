@@ -2118,18 +2118,12 @@ public:
 	/** Maximum recursive level we support when loading tables chained
 	together with FK constraints. If exceeds this level, we will stop
 	loading child table into memory along with its parent table. */
-	unsigned				fk_max_recusive_level:8;
+	byte					fk_max_recusive_level;
 
 	/** Count of how many foreign key check operations are currently being
 	performed on the table. We cannot drop the table while there are
 	foreign key checks running on it. */
 	Atomic_counter<int32_t>			n_foreign_key_checks_running;
-
-	/** Transactions whose view low limit is greater than this number are
-	not allowed to store to the MySQL query cache or retrieve from it.
-	When a trx with undo logs commits, it sets this to the value of the
-	transaction id. */
-	trx_id_t				query_cache_inv_trx_id;
 
 	/** Transaction id that last touched the table definition. Either when
 	loading the definition or CREATE TABLE, or ALTER TABLE (prepare,
@@ -2325,8 +2319,13 @@ public:
   /** List of locks on the table. Protected by lock_sys.assert_locked(lock). */
   table_lock_list_t locks;
 
-	/** Timestamp of the last modification of this table. */
-	time_t					update_time;
+  /** Timestamp of the last modification of this table. */
+  Atomic_relaxed<time_t> update_time;
+  /** Transactions whose view low limit is greater than this number are
+  not allowed to store to the query cache or retrieve from it.
+  When a trx with undo logs commits, it sets this to the value of the
+  transaction id. */
+  Atomic_relaxed<trx_id_t> query_cache_inv_trx_id;
 
 #ifdef UNIV_DEBUG
 	/** Value of 'magic_n'. */

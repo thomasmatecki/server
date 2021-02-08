@@ -2692,13 +2692,13 @@ static bool innobase_query_caching_table_check_low(
 	For read-only transaction: should satisfy (1) and (3)
 	For read-write transaction: should satisfy (1), (2), (3) */
 
-	if (trx->id && trx->id < table->query_cache_inv_trx_id) {
+	const trx_id_t inv = table->query_cache_inv_trx_id;
+
+	if (trx->id && trx->id < inv) {
 		return false;
 	}
 
-	if (trx->read_view.is_open()
-	    && trx->read_view.low_limit_id()
-	    < table->query_cache_inv_trx_id) {
+	if (trx->read_view.is_open() && trx->read_view.low_limit_id() < inv) {
 		return false;
 	}
 

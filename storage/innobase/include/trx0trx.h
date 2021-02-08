@@ -1022,6 +1022,8 @@ public:
   @retval false if the rollback was aborted by shutdown */
   inline bool rollback_finish();
 private:
+  /** Process tables that were modified by the committing transaction. */
+  inline void commit_tables();
   /** Mark a transaction committed in the main memory data structures. */
   inline void commit_in_memory(const mtr_t *mtr);
   /** Commit the transaction in a mini-transaction.

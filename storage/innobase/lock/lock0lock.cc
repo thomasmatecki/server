@@ -3974,7 +3974,6 @@ and release possible other transactions waiting because of these locks. */
 void lock_release(trx_t *trx)
 {
   ulint count= 0;
-  const trx_id_t max_trx_id= trx->undo_no ? trx_sys.get_max_trx_id() : 0;
 
   ut_ad(!trx->mutex_is_owner());
   /* At this point, trx->lock.trx_locks cannot be modified by other
@@ -4003,15 +4002,11 @@ void lock_release(trx_t *trx)
     }
     else
     {
-      dict_table_t *table= lock->un_member.tab_lock.table;
+      ut_d(dict_table_t *table= lock->un_member.tab_lock.table);
       ut_ad(!table->is_temporary());
       ut_ad(table->id >= DICT_HDR_FIRST_ID ||
             (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
             trx->dict_operation);
-      if (max_trx_id && (lock->mode() == LOCK_IX || lock->mode() == LOCK_X))
-        /* The transaction may have modified the table. We block the use of
-        the query cache for all currently active transactions. */
-        table->query_cache_inv_trx_id= max_trx_id;
       lock_table_dequeue(lock, false);
     }
 
