@@ -1395,15 +1395,8 @@ lock_rec_create_low(
 	ut_ad(holds_trx_mutex == trx->mutex_is_owner());
 	ut_ad(dict_index_is_clust(index) || !dict_index_is_online_ddl(index));
 	ut_ad(!(type_mode & LOCK_TABLE));
-
-#ifdef UNIV_DEBUG
-	/* Non-locking autocommit read-only transactions should not set
-	any locks. See comment in trx_set_rw_mode explaining why this
-	conditional check is required in debug code. */
-	if (holds_trx_mutex) {
-		check_trx_state(trx);
-	}
-#endif /* UNIV_DEBUG */
+	ut_ad(trx->state != TRX_STATE_NOT_STARTED);
+	ut_ad(!trx_is_autocommit_non_locking(trx));
 
 	/* If rec is the supremum record, then we reset the gap and
 	LOCK_REC_NOT_GAP bits, as all locks on the supremum are
@@ -1440,6 +1433,18 @@ lock_rec_create_low(
 		trx->mutex_lock();
 	}
 	ut_ad(trx->mutex_is_owner());
+	const auto state = trx->state;
+	if (UNIV_UNLIKELY(state == TRX_STATE_COMMITTED_IN_MEMORY)) {
+		ut_ad(!holds_trx_mutex);
+		ut_ad(!(type_mode & LOCK_WAIT));
+		if (UNIV_LIKELY(!holds_trx_mutex)) {
+			trx->mutex_unlock();
+		}
+		return nullptr;
+	}
+
+	ut_ad(state == TRX_STATE_ACTIVE || state == TRX_STATE_PREPARED
+	      || state == TRX_STATE_PREPARED_RECOVERED);
 
 	if (trx->lock.rec_cached >= UT_ARR_SIZE(trx->lock.rec_pool)
 	    || sizeof *lock + n_bytes > sizeof *trx->lock.rec_pool) {
@@ -1644,6 +1649,9 @@ lock_rec_add_to_queue(
 		ut_error;
 	}
 
+	ut_ad(!caller_owns_trx_mutex
+	      || trx->state != TRX_STATE_COMMITTED_IN_MEMORY);
+
 	if (!(type_mode & (LOCK_WAIT | LOCK_GAP))) {
 		lock_mode	mode = (type_mode & LOCK_MODE_MASK) == LOCK_S
 			? LOCK_X
@@ -1701,12 +1709,19 @@ lock_rec_add_to_queue(
 		we can just set the bit */
 		if (lock_t* lock = lock_rec_find_similar_on_page(
 			    type_mode, heap_no, first_lock, trx)) {
+			trx_t* lock_trx = lock->trx;
 			if (caller_owns_trx_mutex) {
 				trx->mutex_unlock();
 			}
-			lock->trx->mutex_lock();
-			lock_rec_set_nth_bit(lock, heap_no);
-			lock->trx->mutex_unlock();
+			lock_trx->mutex_lock();
+			const auto state = lock_trx->state;
+			if (state != TRX_STATE_COMMITTED_IN_MEMORY) {
+				ut_ad(state == TRX_STATE_ACTIVE
+				      || state == TRX_STATE_PREPARED_RECOVERED
+				      || state == TRX_STATE_PREPARED);
+				lock_rec_set_nth_bit(lock, heap_no);
+			}
+			lock_trx->mutex_unlock();
 			if (caller_owns_trx_mutex) {
 				trx->mutex_lock();
 			}
@@ -2398,14 +2413,17 @@ lock_rec_move_low(
 
 		trx_t* lock_trx = lock->trx;
 		lock_trx->mutex_lock();
-		lock_rec_reset_nth_bit(lock, donator_heap_no);
+		if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY) {
+			lock_rec_reset_nth_bit(lock, donator_heap_no);
 
-		/* Note that we FIRST reset the bit, and then set the lock:
-		the function works also if donator_id == receiver_id */
+			/* Note that we FIRST reset the bit, and then
+			set the lock: the function works also if
+			donator_id == receiver_id */
 
-		lock_rec_add_to_queue(type_mode, receiver_id, receiver.frame,
-				      receiver_heap_no,
-				      lock->index, lock_trx, true);
+			lock_rec_add_to_queue(type_mode, receiver_id,
+					      receiver.frame, receiver_heap_no,
+					      lock->index, lock_trx, true);
+		}
 		lock_trx->mutex_unlock();
 	}
 
@@ -2577,7 +2595,8 @@ lock_move_reorganize_page(
         lock_trx->mutex_lock();
 
         /* Clear the bit in old_lock. */
-        if (old_heap_no < lock->un_member.rec_lock.n_bits &&
+        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
+            old_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, old_heap_no))
         {
           ut_ad(!page_rec_is_metadata(orec));
@@ -2696,7 +2715,8 @@ lock_move_rec_list_end(
         trx_t *lock_trx= lock->trx;
         lock_trx->mutex_lock();
 
-        if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
+            rec1_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           ut_ad(!page_rec_is_metadata(orec));
@@ -2808,7 +2828,8 @@ lock_move_rec_list_start(
         trx_t *lock_trx= lock->trx;
         lock_trx->mutex_lock();
 
-        if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
+            rec1_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           ut_ad(!page_rec_is_metadata(prev));
@@ -2902,7 +2923,8 @@ lock_rtr_move_rec_list(
         trx_t *lock_trx= lock->trx;
         lock_trx->mutex_lock();
 
-        if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
+            rec1_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           if (type_mode & LOCK_WAIT)
@@ -3293,12 +3315,11 @@ lock_table_create(
 {
 	lock_t*		lock;
 
-	ut_ad(table && trx);
 	lock_sys.assert_locked(*table);
 	ut_ad(trx->mutex_is_owner());
 	ut_ad(!trx->is_wsrep() || lock_sys.is_writer());
-
-	check_trx_state(trx);
+	ut_ad(trx->state == TRX_STATE_ACTIVE || trx->is_recovered);
+	ut_ad(!trx_is_autocommit_non_locking(trx));
 
 	switch (LOCK_MODE_MASK & type_mode) {
 	case LOCK_AUTO_INC:
@@ -3948,92 +3969,65 @@ released:
 	}
 }
 
-#ifdef UNIV_DEBUG
-/*********************************************************************//**
-Check if a transaction that has X or IX locks has set the dict_op
-code correctly. */
-static
-void
-lock_check_dict_lock(
-/*==================*/
-	const lock_t*	lock)	/*!< in: lock to check */
-{
-	if (!lock->is_table()) {
-		ut_ad(!lock->index->table->is_temporary());
-
-		/* Check if the transcation locked a record
-		in a system table in X mode. It should have set
-		the dict_op code correctly if it did. */
-		if (lock->mode() == LOCK_X
-		    && lock->index->table->id < DICT_HDR_FIRST_ID) {
-			ut_ad(lock->trx->dict_operation != TRX_DICT_OP_NONE);
-		}
-	} else {
-		const dict_table_t* table = lock->un_member.tab_lock.table;
-		ut_ad(!table->is_temporary());
-		if (table->id >= DICT_HDR_FIRST_ID) {
-			return;
-		}
-
-		/* Check if the transcation locked a system table
-		in IX mode. It should have set the dict_op code
-		correctly if it did. */
-		switch (lock->mode()) {
-		case LOCK_X:
-		case LOCK_IX:
-			ut_ad(lock->trx->dict_operation != TRX_DICT_OP_NONE);
-			break;
-		default:
-			break;
-		}
-	}
-}
-#endif /* UNIV_DEBUG */
-
 /** Release the explicit locks of a committing transaction,
 and release possible other transactions waiting because of these locks. */
-void lock_release(trx_t* trx)
+void lock_release(trx_t *trx)
 {
-	ulint		count = 0;
-	trx_id_t	max_trx_id = trx_sys.get_max_trx_id();
+  ulint count= 0;
+  const trx_id_t max_trx_id= trx->undo_no ? trx_sys.get_max_trx_id() : 0;
 
-	ut_ad(!trx->mutex_is_owner());
-	LockMutexGuard g{SRW_LOCK_CALL};
+  ut_ad(!trx->mutex_is_owner());
+  /* At this point, trx->lock.trx_locks cannot be modified by other
+  threads, because our transaction has been committed.
+  See the checks and assertions in lock_rec_create_low() and
+  lock_rec_add_to_queue().
 
-	for (lock_t* lock = UT_LIST_GET_LAST(trx->lock.trx_locks);
-	     lock != NULL;
-	     lock = UT_LIST_GET_LAST(trx->lock.trx_locks)) {
+  The function lock_table_create() should never be invoked on behalf
+  of a transaction running in another thread. Also there, we will
+  assert that the current transaction be active. */
+  DBUG_ASSERT(trx->state == TRX_STATE_COMMITTED_IN_MEMORY);
+  DBUG_ASSERT(!trx->is_referenced());
+  LockMutexGuard g{SRW_LOCK_CALL};
 
-		ut_d(lock_check_dict_lock(lock));
+  for (lock_t *lock= UT_LIST_GET_LAST(trx->lock.trx_locks); lock;
+       lock= UT_LIST_GET_LAST(trx->lock.trx_locks))
+  {
+    ut_ad(lock->trx == trx);
+    if (!lock->is_table())
+    {
+      ut_ad(!lock->index->table->is_temporary());
+      ut_ad(lock->mode() != LOCK_X ||
+            lock->index->table->id >= DICT_HDR_FIRST_ID ||
+            trx->dict_operation);
+      lock_rec_dequeue_from_page(lock, false);
+    }
+    else
+    {
+      dict_table_t *table= lock->un_member.tab_lock.table;
+      ut_ad(!table->is_temporary());
+      ut_ad(table->id >= DICT_HDR_FIRST_ID ||
+            (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
+            trx->dict_operation);
+      if (max_trx_id && (lock->mode() == LOCK_IX || lock->mode() == LOCK_X))
+        /* The transaction may have modified the table. We block the use of
+        the query cache for all currently active transactions. */
+        table->query_cache_inv_trx_id= max_trx_id;
+      lock_table_dequeue(lock, false);
+    }
 
-		if (!lock->is_table()) {
-			lock_rec_dequeue_from_page(lock, false);
-		} else {
-			if (lock->mode() != LOCK_IS && trx->undo_no) {
-				/* The trx may have modified the table. We
-				block the use of the query cache for
-				all currently active transactions. */
-				lock->un_member.tab_lock.table
-					->query_cache_inv_trx_id = max_trx_id;
-			}
+    if (count == 1000)
+    {
+      /* Release the  mutex for a while, so that we do not monopolize it */
+      lock_sys.wr_unlock();
+      count= 0;
+      lock_sys.wr_lock(SRW_LOCK_CALL);
+    }
 
-			lock_table_dequeue(lock, false);
-		}
+    ++count;
+  }
 
-		if (count == 1000) {
-			/* Release the  mutex for a while, so that we
-			do not monopolize it */
-
-			lock_sys.wr_unlock();
-			count = 0;
-			lock_sys.wr_lock(SRW_LOCK_CALL);
-		}
-
-		++count;
-	}
-
-	trx->lock.was_chosen_as_deadlock_victim = false;
-	trx->lock.n_rec_locks = 0;
+  trx->lock.was_chosen_as_deadlock_victim= false;
+  trx->lock.n_rec_locks= 0;
 }
 
 /*********************************************************************//**
