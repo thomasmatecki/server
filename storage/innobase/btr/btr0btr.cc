@@ -3355,9 +3355,7 @@ btr_lift_page_up(
 		const page_id_t id{block->page.id()};
 		/* Free predicate page locks on the block */
 		if (index->is_spatial()) {
-			LockGuard g{id};
-			lock_prdt_page_free_from_discard(
-				id, &lock_sys.prdt_page_hash);
+			lock_sys.prdt_page_free_from_discard(id, true);
 		}
 		lock_update_copy_and_discard(*father_block, id);
 	}
@@ -3609,9 +3607,8 @@ retry:
 			}
 
 			/* No GAP lock needs to be worrying about */
-			LockGuard g{id};
-			lock_prdt_page_free_from_discard(
-				id, &lock_sys.prdt_page_hash);
+			lock_sys.prdt_page_free_from_discard(id, true);
+			LockGuard g{lock_sys.rec_hash, id};
 			lock_rec_free_all_from_discard_page(id);
 		} else {
 			btr_cur_node_ptr_delete(&father_cursor, mtr);
@@ -3762,9 +3759,8 @@ retry:
 							 merge_page, mtr);
 			}
 			const page_id_t id{block->page.id()};
-			LockGuard g{id};
-			lock_prdt_page_free_from_discard(
-				id, &lock_sys.prdt_page_hash);
+			lock_sys.prdt_page_free_from_discard(id, true);
+			LockGuard g{lock_sys.rec_hash, id};
 			lock_rec_free_all_from_discard_page(id);
 		} else {
 

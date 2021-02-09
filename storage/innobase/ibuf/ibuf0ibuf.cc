@@ -3280,7 +3280,7 @@ commit_exit:
 		ibuf_mtr_commit(&bitmap_mtr);
 		goto fail_exit;
 	} else {
-		LockGuard g{page_id};
+		LockGuard g{lock_sys.rec_hash, page_id};
 		if (lock_sys.get_first(page_id)) {
 			goto commit_exit;
 		}

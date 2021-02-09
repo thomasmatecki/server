@@ -1998,14 +1998,13 @@ retry_page_get:
 		trx_t*		trx = thr_get_trx(cursor->thr);
 		lock_prdt_t	prdt;
 
-		{
-			LockGuard g{block->page.id()};
-			trx->mutex_lock();
-			lock_init_prdt_from_mbr(
-				&prdt, &cursor->rtr_info->mbr, mode,
-				trx->lock.lock_heap);
-			trx->mutex_unlock();
-		}
+		lock_sys.rd_lock(SRW_LOCK_CALL);
+		trx->mutex_lock();
+		lock_init_prdt_from_mbr(
+			&prdt, &cursor->rtr_info->mbr, mode,
+			trx->lock.lock_heap);
+		lock_sys.rd_unlock();
+		trx->mutex_unlock();
 
 		if (rw_latch == RW_NO_LATCH && height != 0) {
 			block->lock.s_lock();

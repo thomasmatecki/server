@@ -234,13 +234,13 @@ lock_prdt_has_lock(
 						attached to the new lock */
 	const trx_t*		trx)		/*!< in: transaction */
 {
-	lock_sys.assert_locked(id);
 	ut_ad((precise_mode & LOCK_MODE_MASK) == LOCK_S
 	      || (precise_mode & LOCK_MODE_MASK) == LOCK_X);
 	ut_ad(!(precise_mode & LOCK_INSERT_INTENTION));
 
-	for (lock_t* lock = lock_rec_get_first(lock_hash_get(type_mode), id,
-					       PRDT_HEAPNO); lock;
+	for (lock_t*lock= lock_sys.get_first(lock_sys.hash_get(type_mode),
+					     id, PRDT_HEAPNO);
+	     lock;
 	     lock = lock_rec_get_next(PRDT_HEAPNO, lock)) {
 		ut_ad(lock->type_mode & (LOCK_PREDICATE | LOCK_PRDT_PAGE));
 
@@ -288,8 +288,8 @@ lock_prdt_other_has_conflicting(
 					the new lock will be on */
 	const trx_t*		trx)	/*!< in: our transaction */
 {
-	for (lock_t* lock = lock_rec_get_first(lock_hash_get(mode), id,
-					       PRDT_HEAPNO);
+	for (lock_t* lock = lock_sys.get_first(lock_sys.hash_get(mode),
+					       id, PRDT_HEAPNO);
 	     lock != NULL;
 	     lock = lock_rec_get_next(PRDT_HEAPNO, lock)) {
 
@@ -383,8 +383,7 @@ lock_prdt_find_on_page(
 {
 	lock_t*	lock;
 
-	for (lock = lock_sys.get_first(*lock_hash_get(type_mode),
-				       block->page.id());
+	for (lock = lock_sys.get_first(type_mode, block->page.id());
 	     lock != NULL;
 	     lock = lock_rec_get_next_on_page(lock)) {
 
@@ -425,8 +424,6 @@ lock_prdt_add_to_queue(
 					/*!< in: TRUE if caller owns the
 					transaction mutex */
 {
-	const page_id_t id{block->page.id()};
-	lock_sys.assert_locked(id);
 	ut_ad(caller_owns_trx_mutex == trx->mutex_is_owner());
 	ut_ad(index->is_spatial());
 	ut_ad(!dict_index_is_online_ddl(index));
@@ -447,7 +444,7 @@ lock_prdt_add_to_queue(
 		goto create;
 	}
 
-	for (lock_t* lock = lock_sys.get_first(*lock_hash_get(type_mode), id);
+	for (lock_t* lock = lock_sys.get_first(type_mode, block->page.id());
 	     lock; lock = lock_rec_get_next_on_page(lock)) {
 		if (lock->is_waiting()
 		    && lock->type_mode & (LOCK_PREDICATE | LOCK_PRDT_PAGE)
@@ -504,7 +501,7 @@ lock_prdt_insert_check_and_lock(
   dberr_t err= DB_SUCCESS;
 
   {
-    LockGuard g{id};
+    LockGuard g{lock_sys.prdt_hash, id};
     /* Because this code is invoked for a running transaction by
     the thread that is serving the transaction, it is not necessary
     to hold trx->mutex here. */
@@ -512,7 +509,7 @@ lock_prdt_insert_check_and_lock(
 
     /* Only need to check locks on prdt_hash */
     if (ut_d(lock_t *lock=)
-        lock_rec_get_first(&lock_sys.prdt_hash, id, PRDT_HEAPNO))
+        lock_sys.get_first(lock_sys.prdt_hash, id, PRDT_HEAPNO))
     {
       ut_ad(lock->type_mode & LOCK_PREDICATE);
 
@@ -615,7 +612,10 @@ lock_prdt_update_split_low(
 {
 	lock_t*		lock;
 
-	for (lock = lock_sys.get_first(*lock_hash_get(type_mode), page_id);
+	// FIXME: acquire the lock!
+	lock_sys.assert_locked(lock_sys.hash_get(type_mode), page_id);
+
+	for (lock = lock_sys.get_first(type_mode, page_id);
 	     lock;
 	     lock = lock_rec_get_next_on_page(lock)) {
 		/* First dealing with Page Lock */
@@ -660,13 +660,13 @@ lock_prdt_update_split(
 	lock_prdt_t*	new_prdt,	/*!< in: MBR on the new page */
 	const page_id_t	page_id)	/*!< in: page number */
 {
-	LockMultiGuard g{page_id, new_block->page.id()};
-
+	lock_sys.rd_lock(SRW_LOCK_CALL);
 	lock_prdt_update_split_low(new_block, prdt, new_prdt,
 				   page_id, LOCK_PREDICATE);
 
 	lock_prdt_update_split_low(new_block, NULL, NULL,
 				   page_id, LOCK_PRDT_PAGE);
+	lock_sys.rd_unlock();
 }
 
 /*********************************************************************//**
@@ -721,9 +721,7 @@ lock_prdt_lock(
 	ut_ad(!dict_index_is_online_ddl(index));
 	ut_ad(type_mode & (LOCK_PREDICATE | LOCK_PRDT_PAGE));
 
-	const hash_table_t& hash = type_mode == LOCK_PREDICATE
-		? lock_sys.prdt_hash
-		: lock_sys.prdt_page_hash;
+	auto& hash = lock_sys.prdt_hash_get(type_mode != LOCK_PREDICATE);
 	const page_id_t id{block->page.id()};
 
 	/* Another transaction cannot have an implicit lock on the record,
@@ -731,7 +729,7 @@ lock_prdt_lock(
 	index record, and this would not have been possible if another active
 	transaction had modified this secondary index record. */
 
-	LockGuard g{id};
+	LockGuard g{hash, id};
 
 	const unsigned	prdt_mode = type_mode | mode;
 	lock_t*		lock = lock_sys.get_first(hash, id);
@@ -822,7 +820,7 @@ lock_place_prdt_page_lock(
 	index record, and this would not have been possible if another active
 	transaction had modified this secondary index record. */
 
-	LockGuard g{page_id};
+	LockGuard g{lock_sys.prdt_page_hash, page_id};
 
 	const lock_t*	lock = lock_sys.get_first_prdt_page(page_id);
 	const ulint	mode = LOCK_S | LOCK_PRDT_PAGE;
@@ -861,7 +859,7 @@ lock_place_prdt_page_lock(
 @return	true if there is none */
 bool lock_test_prdt_page_lock(const trx_t *trx, const page_id_t page_id)
 {
-  LockGuard g{page_id};
+  LockGuard g{lock_sys.prdt_page_hash, page_id};
   lock_t *lock= lock_sys.get_first_prdt_page(page_id);
   return !lock || trx == lock->trx;
 }
@@ -876,9 +874,9 @@ lock_prdt_rec_move(
 						the receiving record */
 	const page_id_t		donator)	/*!< in: target page */
 {
-	LockMultiGuard g{receiver->page.id(), donator};
+	LockMultiGuard g{lock_sys.prdt_hash, receiver->page.id(), donator};
 
-	for (lock_t *lock = lock_rec_get_first(&lock_sys.prdt_hash,
+	for (lock_t *lock = lock_sys.get_first(lock_sys.prdt_hash,
 					       donator, PRDT_HEAPNO);
 	     lock != NULL;
 	     lock = lock_rec_get_next(PRDT_HEAPNO, lock)) {
@@ -897,18 +895,22 @@ lock_prdt_rec_move(
 	}
 }
 
-/** Removes predicate lock objects set on an index page which is discarded.
-@param[in]	id		page to be discarded
-@param[in]	lock_hash	lock hash */
-void
-lock_prdt_page_free_from_discard(const page_id_t id, hash_table_t *lock_hash)
+/** Remove locks on a discarded SPATIAL INDEX page.
+@param id   page to be discarded
+@param page whether to use lock_sys.prdt_page_hash */
+void lock_sys_t::prdt_page_free_from_discard(const page_id_t id, bool page)
 {
-  lock_sys.assert_locked(id);
+  auto &hash= prdt_hash_get(page);
+  auto latch= hash.lock_get(lock_sys.hash(id));
+  rd_lock(SRW_LOCK_CALL);
+  latch->acquire();
 
-  for (lock_t *lock= lock_sys.get_first(*lock_hash, id), *next; lock;
-       lock= next)
+  for (lock_t *lock= lock_sys.get_first(hash, id), *next; lock; lock= next)
   {
     next= lock_rec_get_next_on_page(lock);
-    lock_rec_discard(lock);
+    lock_rec_discard(hash, lock);
   }
+
+  rd_unlock();
+  latch->release();
 }
