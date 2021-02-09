@@ -171,31 +171,29 @@ INSERT INTO t1 VALUES (13, NULL);
 --let $binlog_start= 4
 --source include/show_binlog_events.inc
 
+SET DEBUG_SYNC= "now SIGNAL con10_cont";
+connection con10;
+reap;
+connection default;
+
 # We need to sync the test case with the background processing of the
 # commit checkpoint, otherwise we get nondeterministic results.
 SET @old_dbug= @@global.DEBUG_DBUG;
 SET GLOBAL debug_dbug="+d,binlog_background_checkpoint_processed";
 
-SET DEBUG_SYNC= "now SIGNAL con10_cont";
-connection con10;
-reap;
-connection default;
-SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
-
 SET DEBUG_SYNC= "now SIGNAL con12_cont";
+SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
 connection con12;
 reap;
 connection default;
-SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
 
 SET DEBUG_SYNC= "now SIGNAL con11_cont";
-connection con11;
-reap;
-connection default;
 SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
 SET GLOBAL debug_dbug= @old_dbug;
-SET DEBUG_SYNC= "RESET";
+connection con11;
+reap;
 
+connection default;
 # Wait for the last (master-bin.000004) binlog checkpoint to appear.
 --let $wait_for_all= 0
 --let $show_statement= SHOW BINLOG EVENTS IN "master-bin.000004"

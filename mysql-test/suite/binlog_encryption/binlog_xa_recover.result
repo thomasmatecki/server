@@ -148,22 +148,20 @@ master-bin.000004	#	Annotate_rows	#	#	INSERT INTO t1 VALUES (13, NULL)
 master-bin.000004	#	Table_map	#	#	table_id: # (test.t1)
 master-bin.000004	#	Write_rows_v1	#	#	table_id: # flags: STMT_END_F
 master-bin.000004	#	Xid	#	#	COMMIT /* XID */
-SET @old_dbug= @@global.DEBUG_DBUG;
-SET GLOBAL debug_dbug="+d,binlog_background_checkpoint_processed";
 SET DEBUG_SYNC= "now SIGNAL con10_cont";
 connection con10;
 connection default;
-SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
+SET @old_dbug= @@global.DEBUG_DBUG;
+SET GLOBAL debug_dbug="+d,binlog_background_checkpoint_processed";
 SET DEBUG_SYNC= "now SIGNAL con12_cont";
+SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
 connection con12;
 connection default;
-SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
 SET DEBUG_SYNC= "now SIGNAL con11_cont";
-connection con11;
-connection default;
 SET DEBUG_SYNC= "now WAIT_FOR binlog_background_checkpoint_processed";
 SET GLOBAL debug_dbug= @old_dbug;
-SET DEBUG_SYNC= "RESET";
+connection con11;
+connection default;
 Now crash the server
 SET SESSION debug_dbug="+d,crash_commit_after_log";
 INSERT INTO t1 VALUES (14, NULL);
