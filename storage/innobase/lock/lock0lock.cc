@@ -1425,18 +1425,7 @@ lock_rec_create_low(
 		trx->mutex_lock();
 	}
 	ut_ad(trx->mutex_is_owner());
-	const auto state = trx->state;
-	if (UNIV_UNLIKELY(state == TRX_STATE_COMMITTED_IN_MEMORY)) {
-		ut_ad(!holds_trx_mutex);
-		ut_ad(!(type_mode & LOCK_WAIT));
-		if (UNIV_LIKELY(!holds_trx_mutex)) {
-			trx->mutex_unlock();
-		}
-		return nullptr;
-	}
-
-	ut_ad(state == TRX_STATE_ACTIVE || state == TRX_STATE_PREPARED
-	      || state == TRX_STATE_PREPARED_RECOVERED);
+	ut_ad(trx->state != TRX_STATE_NOT_STARTED);
 
 	if (trx->lock.rec_cached >= UT_ARR_SIZE(trx->lock.rec_pool)
 	    || sizeof *lock + n_bytes > sizeof *trx->lock.rec_pool) {
@@ -1641,9 +1630,6 @@ lock_rec_add_to_queue(
 		ut_error;
 	}
 
-	ut_ad(!caller_owns_trx_mutex
-	      || trx->state != TRX_STATE_COMMITTED_IN_MEMORY);
-
 	if (!(type_mode & (LOCK_WAIT | LOCK_GAP))) {
 		lock_mode	mode = (type_mode & LOCK_MODE_MASK) == LOCK_S
 			? LOCK_X
@@ -1706,13 +1692,7 @@ lock_rec_add_to_queue(
 				trx->mutex_unlock();
 			}
 			lock_trx->mutex_lock();
-			const auto state = lock_trx->state;
-			if (state != TRX_STATE_COMMITTED_IN_MEMORY) {
-				ut_ad(state == TRX_STATE_ACTIVE
-				      || state == TRX_STATE_PREPARED_RECOVERED
-				      || state == TRX_STATE_PREPARED);
-				lock_rec_set_nth_bit(lock, heap_no);
-			}
+			lock_rec_set_nth_bit(lock, heap_no);
 			lock_trx->mutex_unlock();
 			if (caller_owns_trx_mutex) {
 				trx->mutex_lock();
@@ -2198,23 +2178,17 @@ lock_rec_discard(
   ut_ad(!in_lock->is_table());
   lock_sys.assert_locked(in_lock->un_member.rec_lock.page_id);
 
+  HASH_DELETE(lock_t, hash, lock_hash_get(in_lock->type_mode),
+              in_lock->un_member.rec_lock.page_id.fold(), in_lock);
   trx_t *trx= in_lock->trx;
-  if (trx->state == TRX_STATE_COMMITTED_IN_MEMORY)
-    return;
-
   trx->mutex_lock();
-  if (trx->state != TRX_STATE_COMMITTED_IN_MEMORY)
-  {
-    HASH_DELETE(lock_t, hash, lock_hash_get(in_lock->type_mode),
-                in_lock->un_member.rec_lock.page_id.fold(), in_lock);
-    ut_d(auto old_locks=)
-    in_lock->index->table->n_rec_locks--;
-    ut_ad(old_locks);
-    UT_LIST_REMOVE(trx->lock.trx_locks, in_lock);
-    MONITOR_INC(MONITOR_RECLOCK_REMOVED);
-    MONITOR_DEC(MONITOR_NUM_RECLOCK);
-  }
+  ut_d(auto old_locks=)
+  in_lock->index->table->n_rec_locks--;
+  ut_ad(old_locks);
+  UT_LIST_REMOVE(trx->lock.trx_locks, in_lock);
   trx->mutex_unlock();
+  MONITOR_INC(MONITOR_RECLOCK_REMOVED);
+  MONITOR_DEC(MONITOR_NUM_RECLOCK);
 }
 
 /*************************************************************//**
@@ -2228,8 +2202,7 @@ static void lock_rec_free_all_from_discard_page_low(const page_id_t id,
 
   while (lock)
   {
-    ut_ad(lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY ||
-          lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
+    ut_ad(lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
     ut_ad(!lock->is_waiting());
     lock_t *next_lock= lock_rec_get_next_on_page(lock);
     lock_rec_discard(lock);
@@ -2395,7 +2368,6 @@ lock_rec_move_low(
 	ut_ad(!lock_rec_get_first(lock_hash, receiver_id, receiver_heap_no)
 	      || lock_hash == &lock_sys.prdt_hash
 	      || lock_hash == &lock_sys.prdt_page_hash);
-	ut_d(bool committed = false);
 
 	for (lock_t *lock =
 	     lock_rec_get_first(lock_hash, donator_id, donator_heap_no);
@@ -2409,24 +2381,19 @@ lock_rec_move_low(
 
 		trx_t* lock_trx = lock->trx;
 		lock_trx->mutex_lock();
-		if (lock_trx->state == TRX_STATE_COMMITTED_IN_MEMORY) {
-			ut_d(committed = true);
-		} else {
-			lock_rec_reset_nth_bit(lock, donator_heap_no);
+		lock_rec_reset_nth_bit(lock, donator_heap_no);
 
-			/* Note that we FIRST reset the bit, and then
-			set the lock: the function works also if
-			donator_id == receiver_id */
+		/* Note that we FIRST reset the bit, and then set the lock:
+		the function works also if donator_id == receiver_id */
 
-			lock_rec_add_to_queue(type_mode, receiver_id,
-					      receiver.frame, receiver_heap_no,
-					      lock->index, lock_trx, true);
-		}
+		lock_rec_add_to_queue(type_mode, receiver_id, receiver.frame,
+				      receiver_heap_no,
+				      lock->index, lock_trx, true);
 		lock_trx->mutex_unlock();
 	}
 
-	ut_ad(committed || !lock_rec_get_first(&lock_sys.rec_hash,
-					       donator_id, donator_heap_no));
+	ut_ad(!lock_rec_get_first(&lock_sys.rec_hash,
+				  donator_id, donator_heap_no));
 }
 
 /** Move all the granted locks to the front of the given lock list.
@@ -2562,7 +2529,6 @@ lock_move_reorganize_page(
       were temporarily stored on the infimum */
       const rec_t *rec1= page_get_infimum_rec(block->frame);
       const rec_t *rec2= page_get_infimum_rec(oblock->frame);
-      ut_d(bool committed= false);
 
       /* Set locks according to old locks */
       for (;;)
@@ -2594,10 +2560,8 @@ lock_move_reorganize_page(
         lock_trx->mutex_lock();
 
         /* Clear the bit in old_lock. */
-        if (lock_trx->state == TRX_STATE_COMMITTED_IN_MEMORY)
-          ut_d(committed= true);
-        else if (old_heap_no < lock->un_member.rec_lock.n_bits &&
-                 lock_rec_reset_nth_bit(lock, old_heap_no))
+        if (old_heap_no < lock->un_member.rec_lock.n_bits &&
+            lock_rec_reset_nth_bit(lock, old_heap_no))
         {
           ut_ad(!page_rec_is_metadata(orec));
 
@@ -2616,7 +2580,7 @@ lock_move_reorganize_page(
         }
       }
 
-      ut_ad(committed || lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
+      ut_ad(lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
     }
   }
 
@@ -2715,8 +2679,7 @@ lock_move_rec_list_end(
         trx_t *lock_trx= lock->trx;
         lock_trx->mutex_lock();
 
-        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
-            rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+        if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           ut_ad(!page_rec_is_metadata(orec));
@@ -2783,7 +2746,6 @@ lock_move_rec_list_start(
       const rec_t *rec1;
       const rec_t *rec2;
       const auto type_mode= lock->type_mode;
-      ut_d(bool committed= false);
 
       if (comp)
       {
@@ -2829,10 +2791,8 @@ lock_move_rec_list_start(
         trx_t *lock_trx= lock->trx;
         lock_trx->mutex_lock();
 
-        if (lock_trx->state == TRX_STATE_COMMITTED_IN_MEMORY)
-          ut_d(committed= true);
-        else if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
-                 lock_rec_reset_nth_bit(lock, rec1_heap_no))
+        if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+            lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           ut_ad(!page_rec_is_metadata(prev));
 
@@ -2850,7 +2810,7 @@ lock_move_rec_list_start(
       }
 
 #ifdef UNIV_DEBUG
-      if (!committed && page_rec_is_supremum(rec))
+      if (page_rec_is_supremum(rec))
         for (auto i= lock_rec_get_n_bits(lock); --i > PAGE_HEAP_NO_USER_LOW; )
           ut_ad(!lock_rec_get_nth_bit(lock, i));
 #endif /* UNIV_DEBUG */
@@ -2925,8 +2885,7 @@ lock_rtr_move_rec_list(
         trx_t *lock_trx= lock->trx;
         lock_trx->mutex_lock();
 
-        if (lock_trx->state != TRX_STATE_COMMITTED_IN_MEMORY &&
-            rec1_heap_no < lock->un_member.rec_lock.n_bits &&
+        if (rec1_heap_no < lock->un_member.rec_lock.n_bits &&
             lock_rec_reset_nth_bit(lock, rec1_heap_no))
         {
           if (type_mode & LOCK_WAIT)
@@ -3997,7 +3956,8 @@ void lock_release(trx_t *trx)
   DBUG_ASSERT(trx->state == TRX_STATE_COMMITTED_IN_MEMORY);
   DBUG_ASSERT(!trx->is_referenced());
 
-  lock_sys.rd_lock(SRW_LOCK_CALL);
+  LockMutexGuard g{SRW_LOCK_CALL};
+  trx->mutex_lock();
 
   for (lock_t *lock= UT_LIST_GET_LAST(trx->lock.trx_locks); lock;
        lock= UT_LIST_GET_LAST(trx->lock.trx_locks))
@@ -4009,11 +3969,7 @@ void lock_release(trx_t *trx)
       ut_ad(lock->mode() != LOCK_X ||
             lock->index->table->id >= DICT_HDR_FIRST_ID ||
             trx->dict_operation);
-      const auto l= lock_sys.lock_page_latch(lock->un_member.rec_lock.page_id);
-      trx->mutex_lock();
       lock_rec_dequeue_from_page(lock, false);
-      trx->mutex_unlock();
-      lock_sys.unlock_page_latch(l);
     }
     else
     {
@@ -4022,25 +3978,23 @@ void lock_release(trx_t *trx)
       ut_ad(table->id >= DICT_HDR_FIRST_ID ||
             (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
             trx->dict_operation);
-      const auto l= lock_sys.lock_table_latch(table->id);
-      trx->mutex_lock();
       lock_table_dequeue(lock, false);
-      trx->mutex_unlock();
-      lock_sys.unlock_table_latch(l);
     }
 
     if (count == 1000)
     {
       /* Release the latch for a while, so that we do not monopolize it */
-      lock_sys.rd_unlock();
+      lock_sys.wr_unlock();
+      trx->mutex_unlock();
       count= 0;
-      lock_sys.rd_lock(SRW_LOCK_CALL);
+      lock_sys.wr_lock(SRW_LOCK_CALL);
+      trx->mutex_lock();
     }
 
     ++count;
   }
 
-  lock_sys.rd_unlock();
+  trx->mutex_unlock();
   trx->lock.was_chosen_as_deadlock_victim= false;
   trx->lock.n_rec_locks= 0;
 }
@@ -4688,14 +4642,9 @@ loop:
 
 	ut_ad(!trx_is_ac_nl_ro(lock->trx));
 
-	if (latched) {
-		/* Only validate the record queues when this thread is not
-		holding a tablespace latch. */
-	} else if (lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY) {
-		/* After a transaction is commited, its locks that
-		refer to discarded pages will continue to exist until
-		lock_release() is finished. */
-	} else
+	/* Only validate the record queues when this thread is not
+	holding a tablespace latch. */
+	if (!latched)
 	for (i = nth_bit; i < lock_rec_get_n_bits(lock); i++) {
 
 		if (i == PAGE_HEAP_NO_SUPREMUM
@@ -4844,8 +4793,7 @@ static void lock_validate()
       page_id_t limit{0, 0};
       while (const lock_t *lock= lock_rec_validate(i, &limit))
       {
-        if (lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY ||
-            lock_rec_find_set_bit(lock) == ULINT_UNDEFINED)
+        if (lock_rec_find_set_bit(lock) == ULINT_UNDEFINED)
           /* The lock bitmap is empty; ignore it. */
           continue;
         pages.insert(lock->un_member.rec_lock.page_id);
@@ -6119,8 +6067,7 @@ inline trx_t* DeadlockChecker::search()
 			continue;
 		}
 
-		if (lock->trx->state == TRX_STATE_COMMITTED_IN_MEMORY
-		    || !lock_has_to_wait(m_wait_lock, lock)) {
+		if (!lock_has_to_wait(m_wait_lock, lock)) {
 			/* No conflict, next lock */
 			lock = get_next_lock(lock, heap_no);
 			continue;
