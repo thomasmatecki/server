@@ -615,13 +615,9 @@ private:
 
   /** Protection of rec_hash, prdt_hash, prdt_page_hash with latch.rd_lock() */
   MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) srw_mutex page_latches[LATCHES];
-  /** Protection of table locks together with latch.rd_lock() */
-  MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) srw_mutex table_latches[LATCHES];
 #ifdef UNIV_DEBUG
   MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE)
   Atomic_relaxed<os_thread_id_t> page_latch_owners[LATCHES];
-  MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE)
-  Atomic_relaxed<os_thread_id_t> table_latch_owners[LATCHES];
 #endif
 public:
   /**
@@ -685,9 +681,6 @@ public:
     return true;
   }
 
-  /** Acquire a table lock mutex.
-  @return parameter to unlock_table_latch() that the caller must invoke */
-  inline unsigned lock_table_latch(table_id_t id);
   /** Get a page lock mutex.
   @return parameter to lock_page_latch() and unlock_page_latch(). */
   unsigned get_page_latch(page_id_t id) const
@@ -706,14 +699,6 @@ public:
     ut_ad(page_latch_owners[shard] == os_thread_get_curr_id());
     ut_d(page_latch_owners[shard]= 0);
     page_latches[shard].wr_unlock();
-  }
-  /** Release a table latch mutex */
-  void unlock_table_latch(unsigned shard)
-  {
-    ut_ad(shard < LATCHES);
-    ut_ad(table_latch_owners[shard] == os_thread_get_curr_id());
-    ut_d(table_latch_owners[shard]= 0);
-    table_latches[shard].wr_unlock();
   }
 
 #ifdef UNIV_DEBUG

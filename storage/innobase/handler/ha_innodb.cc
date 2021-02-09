@@ -2260,7 +2260,7 @@ ha_innobase::innobase_reset_autoinc(
 	if (error == DB_SUCCESS) {
 
 		dict_table_autoinc_initialize(m_prebuilt->table, autoinc);
-		m_prebuilt->table->autoinc_mutex.unlock();
+		m_prebuilt->table->autoinc_mutex.wr_unlock();
 	}
 
 	return(error);
@@ -5369,7 +5369,7 @@ initialize_auto_increment(dict_table_t* table, const Field* field)
 
 	const unsigned	col_no = innodb_col_no(field);
 
-	table->autoinc_mutex.lock();
+	table->autoinc_mutex.wr_lock();
 
 	table->persistent_autoinc = static_cast<uint16_t>(
 		dict_table_get_nth_col_pos(table, col_no, NULL) + 1)
@@ -5400,7 +5400,7 @@ initialize_auto_increment(dict_table_t* table, const Field* field)
 			innobase_get_int_col_max_value(field));
 	}
 
-	table->autoinc_mutex.unlock();
+	table->autoinc_mutex.wr_unlock();
 }
 
 /** Open an InnoDB table
@@ -7202,7 +7202,7 @@ ha_innobase::innobase_lock_autoinc(void)
 	switch (innobase_autoinc_lock_mode) {
 	case AUTOINC_NO_LOCKING:
 		/* Acquire only the AUTOINC mutex. */
-		m_prebuilt->table->autoinc_mutex.lock();
+		m_prebuilt->table->autoinc_mutex.wr_lock();
 		break;
 
 	case AUTOINC_NEW_STYLE_LOCKING:
@@ -7216,14 +7216,14 @@ ha_innobase::innobase_lock_autoinc(void)
 		case SQLCOM_REPLACE:
 		case SQLCOM_END: // RBR event
 			/* Acquire the AUTOINC mutex. */
-			m_prebuilt->table->autoinc_mutex.lock();
+			m_prebuilt->table->autoinc_mutex.wr_lock();
 			/* We need to check that another transaction isn't
 			already holding the AUTOINC lock on the table. */
 			if (!m_prebuilt->table->n_waiting_or_granted_auto_inc_locks) {
 				/* Do not fall back to old style locking. */
 				DBUG_RETURN(error);
 			}
-			m_prebuilt->table->autoinc_mutex.unlock();
+			m_prebuilt->table->autoinc_mutex.wr_unlock();
 		}
 		/* Use old style locking. */
 		/* fall through */
@@ -7235,7 +7235,7 @@ ha_innobase::innobase_lock_autoinc(void)
 		if (error == DB_SUCCESS) {
 
 			/* Acquire the AUTOINC mutex. */
-			m_prebuilt->table->autoinc_mutex.lock();
+			m_prebuilt->table->autoinc_mutex.wr_lock();
 		}
 		break;
 
@@ -7263,7 +7263,7 @@ ha_innobase::innobase_set_max_autoinc(
 	if (error == DB_SUCCESS) {
 
 		dict_table_autoinc_update_if_greater(m_prebuilt->table, auto_inc);
-		m_prebuilt->table->autoinc_mutex.unlock();
+		m_prebuilt->table->autoinc_mutex.wr_unlock();
 	}
 
 	return(error);
@@ -12644,7 +12644,7 @@ create_table_info_t::create_table_update_dict()
 			autoinc = 1;
 		}
 
-		innobase_table->autoinc_mutex.lock();
+		innobase_table->autoinc_mutex.wr_lock();
 		dict_table_autoinc_initialize(innobase_table, autoinc);
 
 		if (innobase_table->is_temporary()) {
@@ -12672,7 +12672,7 @@ create_table_info_t::create_table_update_dict()
 			}
 		}
 
-		innobase_table->autoinc_mutex.unlock();
+		innobase_table->autoinc_mutex.wr_unlock();
 	}
 
 	innobase_parse_hint_from_comment(m_thd, innobase_table, m_form->s);
@@ -15920,7 +15920,7 @@ ha_innobase::innobase_get_autoinc(
 		/* It should have been initialized during open. */
 		if (*value == 0) {
 			m_prebuilt->autoinc_error = DB_UNSUPPORTED;
-			m_prebuilt->table->autoinc_mutex.unlock();
+			m_prebuilt->table->autoinc_mutex.wr_unlock();
 		}
 	}
 
@@ -15944,7 +15944,7 @@ ha_innobase::innobase_peek_autoinc(void)
 
 	innodb_table = m_prebuilt->table;
 
-	innodb_table->autoinc_mutex.lock();
+	innodb_table->autoinc_mutex.wr_lock();
 
 	auto_inc = dict_table_autoinc_read(innodb_table);
 
@@ -15953,7 +15953,7 @@ ha_innobase::innobase_peek_autoinc(void)
 			" '" << innodb_table->name << "'";
 	}
 
-	innodb_table->autoinc_mutex.unlock();
+	innodb_table->autoinc_mutex.wr_unlock();
 
 	return(auto_inc);
 }
@@ -16060,7 +16060,7 @@ ha_innobase::get_auto_increment(
 		/* Out of range number. Let handler::update_auto_increment()
 		take care of this */
 		m_prebuilt->autoinc_last_value = 0;
-		m_prebuilt->table->autoinc_mutex.unlock();
+		m_prebuilt->table->autoinc_mutex.wr_unlock();
 		*nb_reserved_values= 0;
 		return;
 	}
@@ -16103,7 +16103,7 @@ ha_innobase::get_auto_increment(
 	m_prebuilt->autoinc_offset = offset;
 	m_prebuilt->autoinc_increment = increment;
 
-	m_prebuilt->table->autoinc_mutex.unlock();
+	m_prebuilt->table->autoinc_mutex.wr_unlock();
 }
 
 /*******************************************************************//**

@@ -1958,6 +1958,26 @@ struct dict_table_t {
   /** Clear the table when rolling back TRX_UNDO_EMPTY */
   void clear(que_thr_t *thr);
 
+#ifdef UNIV_DEBUG
+  /** @return whether the current thread holds the lock_mutex */
+  bool lock_mutex_is_owner() const
+  { return lock_mutex_owner == os_thread_get_curr_id(); }
+#endif /* UNIV_DEBUG */
+  void lock_mutex_init() { lock_mutex.init(); }
+  void lock_mutex_destroy() { lock_mutex.destroy(); }
+  /** Acquire lock_mutex */
+  void lock_mutex_lock()
+  {
+    ut_ad(!lock_mutex_is_owner());
+    lock_mutex.wr_lock();
+    ut_ad(!lock_mutex_owner.exchange(os_thread_get_curr_id()));
+  }
+  /** Release lock_mutex */
+  void lock_mutex_unlock()
+  {
+    ut_ad(lock_mutex_owner.exchange(0) == os_thread_get_curr_id());
+    lock_mutex.wr_unlock();
+  }
 private:
 	/** Initialize instant->field_map.
 	@param[in]	table	table definition to copy from */
@@ -2267,14 +2287,21 @@ public:
 	from a select. */
 	lock_t*					autoinc_lock;
 
-	/** Mutex protecting the autoincrement counter. */
-	std::mutex				autoinc_mutex;
-
-	/** Autoinc counter value to give to the next inserted row. */
-	ib_uint64_t				autoinc;
+  /** Mutex protecting autoinc. */
+  srw_mutex autoinc_mutex;
+private:
+  /** Mutex protecting locks on this table. */
+  srw_mutex lock_mutex;
+#ifdef UNIV_DEBUG
+  /** The owner of lock_mutex (0 if none) */
+  Atomic_relaxed<os_thread_id_t> lock_mutex_owner{0};
+#endif
+public:
+  /** Autoinc counter value to give to the next inserted row. */
+  uint64_t autoinc;
 
   /** The transaction that currently holds the the AUTOINC lock on this table.
-  Protected by lock_sys.assert_locked(*this).
+  Protected by lock_mutex.
   The thread that is executing autoinc_trx may read this field without
   holding a latch, in row_lock_table_autoinc_for_mysql().
   Only the autoinc_trx thread may clear this field; it cannot be
@@ -2292,7 +2319,7 @@ public:
 	/* @} */
 
   /** Number of granted or pending LOCK_S or LOCK_X on the table.
-  Protected by lock_sys.assert_locked(*this). */
+  Protected by lock_mutex. */
   uint32_t n_lock_x_or_s;
 
 	/** FTS specific state variables. */

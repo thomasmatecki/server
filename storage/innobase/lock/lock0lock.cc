@@ -88,7 +88,7 @@ void lock_sys_t::assert_locked(const dict_table_t &table) const
   if (writer.load(std::memory_order_relaxed) == current_thread)
     return;
   ut_ad(readers);
-  ut_ad(current_thread == table_latch_owners[table.id % LATCHES]);
+  ut_ad(table.lock_mutex_is_owner());
 }
 
 /** Assert that a page shard is exclusively latched by this thread */
@@ -101,18 +101,6 @@ void lock_sys_t::assert_locked(const page_id_t id) const
   ut_ad(current_thread == page_latch_owners[get_page_latch(id)]);
 }
 #endif
-
-/** Acquire a table lock mutex.
-@return parameter to unlock_table_latch() that the caller must invoke */
-inline unsigned lock_sys_t::lock_table_latch(table_id_t id)
-{
-  unsigned shard= static_cast<unsigned>(id % LATCHES);
-  ut_ad(readers);
-  table_latches[shard].wr_lock();
-  ut_ad(!table_latch_owners[shard]);
-  ut_d(table_latch_owners[shard]= os_thread_get_curr_id());
-  return shard;
-}
 
 /** Acquire a page lock mutex. */
 inline void lock_sys_t::lock_page_latch(unsigned shard)
@@ -471,8 +459,6 @@ void lock_sys_t::create(ulint n_cells)
   latch.SRW_LOCK_INIT(lock_latch_key);
   for (size_t i= 0; i < LATCHES; i++)
     page_latches[i].init();
-  for (size_t i= 0; i < LATCHES; i++)
-    table_latches[i].init();
   mysql_mutex_init(lock_wait_mutex_key, &wait_mutex, nullptr);
 
   rec_hash.create(n_cells);
@@ -579,8 +565,6 @@ void lock_sys_t::close()
   latch.destroy();
   for (size_t i= 0; i < LATCHES; i++)
     page_latches[i].destroy();
-  for (size_t i= 0; i < LATCHES; i++)
-    table_latches[i].destroy();
   mysql_mutex_destroy(&wait_mutex);
 
   m_initialised= false;
@@ -3633,17 +3617,15 @@ lock_table(
 	err = DB_SUCCESS;
 
 #ifdef WITH_WSREP
-	unsigned shard;
 	if (trx->is_wsrep()) {
-		shard = ~0U;
 		lock_sys.wr_lock(SRW_LOCK_CALL);
 	} else {
 		lock_sys.rd_lock(SRW_LOCK_CALL);
-		shard = lock_sys.lock_table_latch(table->id);
+		table->lock_mutex_lock();
 	}
 #else
 	lock_sys.rd_lock(SRW_LOCK_CALL);
-	const unsigned shard = lock_sys.lock_table_latch(table->id);
+	table->lock_mutex_lock();
 #endif
 
 	/* We have to check if the new lock is compatible with any locks
@@ -3665,15 +3647,15 @@ lock_table(
 	}
 
 #ifdef WITH_WSREP
-	if (UNIV_UNLIKELY(shard == ~0U)) {
+	if (trx->is_wsrep()) {
 		lock_sys.wr_unlock();
 		trx->mutex_unlock();
 		return err;
 	}
 #endif
+	table->lock_mutex_unlock();
 	lock_sys.rd_unlock();
 	trx->mutex_unlock();
-	lock_sys.unlock_table_latch(shard);
 
 	return(err);
 }
@@ -3796,12 +3778,12 @@ void lock_table_x_unlock(dict_table_t *table, trx_t *trx)
         lock->un_member.tab_lock.table != table)
       continue;
     lock_sys.rd_lock(SRW_LOCK_CALL);
-    const auto l= lock_sys.lock_table_latch(table->id);
+    table->lock_mutex_lock();
     trx->mutex_lock();
     lock_table_dequeue(lock, false);
     trx->mutex_unlock();
+    table->lock_mutex_unlock();
     lock_sys.rd_unlock();
-    lock_sys.unlock_table_latch(l);
     lock= nullptr;
     return;
   }
