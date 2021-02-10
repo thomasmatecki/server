@@ -3945,8 +3945,7 @@ void lock_release(trx_t *trx)
   DBUG_ASSERT(trx->state == TRX_STATE_COMMITTED_IN_MEMORY);
   DBUG_ASSERT(!trx->is_referenced());
 
-  LockMutexGuard g{SRW_LOCK_CALL};
-  trx->mutex_lock();
+  lock_sys.rd_lock(SRW_LOCK_CALL);
 
   for (lock_t *lock= UT_LIST_GET_LAST(trx->lock.trx_locks); lock;
        lock= UT_LIST_GET_LAST(trx->lock.trx_locks))
@@ -3958,32 +3957,41 @@ void lock_release(trx_t *trx)
       ut_ad(lock->mode() != LOCK_X ||
             lock->index->table->id >= DICT_HDR_FIRST_ID ||
             trx->dict_operation);
+      auto &lock_hash= lock_sys.hash_get(lock->type_mode);
+      auto latch= lock_hash.lock_get
+        (lock_hash.calc_hash(lock->un_member.rec_lock.page_id.fold()));
+      latch->acquire();
+      trx->mutex_lock();
       lock_rec_dequeue_from_page(lock, false);
+      trx->mutex_unlock();
+      latch->release();
     }
     else
     {
-      ut_d(dict_table_t *table= lock->un_member.tab_lock.table);
+      dict_table_t *table= lock->un_member.tab_lock.table;
       ut_ad(!table->is_temporary());
       ut_ad(table->id >= DICT_HDR_FIRST_ID ||
             (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
             trx->dict_operation);
+      table->lock_mutex_lock();
+      trx->mutex_lock();
       lock_table_dequeue(lock, false);
+      trx->mutex_unlock();
+      table->lock_mutex_unlock();
     }
 
     if (count == 1000)
     {
       /* Release the latch for a while, so that we do not monopolize it */
-      lock_sys.wr_unlock();
-      trx->mutex_unlock();
+      lock_sys.rd_unlock();
       count= 0;
-      lock_sys.wr_lock(SRW_LOCK_CALL);
-      trx->mutex_lock();
+      lock_sys.rd_lock(SRW_LOCK_CALL);
     }
 
     ++count;
   }
 
-  trx->mutex_unlock();
+  lock_sys.rd_unlock();
   trx->lock.was_chosen_as_deadlock_victim= false;
   trx->lock.n_rec_locks= 0;
 }
