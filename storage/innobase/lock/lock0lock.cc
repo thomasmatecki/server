@@ -122,22 +122,17 @@ void lock_sys_t::hash_table::resize(ulint n)
 #if defined SRW_LOCK_DUMMY && !defined _WIN32
 void lock_sys_t::hash_latch::wait()
 {
-  write_lock_wait_start();
-
-  if (write_lock_poll())
-    return;
-
   pthread_mutex_lock(&lock_sys.hash_mutex);
-  while (!write_lock_poll())
+  while (!write_trylock())
     pthread_cond_wait(&lock_sys.hash_cond, &lock_sys.hash_mutex);
   pthread_mutex_unlock(&lock_sys.hash_mutex);
 }
 
 void lock_sys_t::hash_latch::release()
 {
-  write_unlock();
   pthread_mutex_lock(&lock_sys.hash_mutex);
-  pthread_cond_broadcast(&lock_sys.hash_cond);
+  write_unlock();
+  pthread_cond_signal(&lock_sys.hash_cond);
   pthread_mutex_unlock(&lock_sys.hash_mutex);
 }
 #endif
