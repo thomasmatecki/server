@@ -3928,12 +3928,10 @@ released:
 }
 
 /** Release the explicit locks of a committing transaction,
-and release possible other transactions waiting because of these locks. */
-void lock_release(trx_t *trx)
+and release possible other transactions waiting because of these locks.
+@return whether the operation succeeded */
+static bool lock_release_try(trx_t *trx)
 {
-  ulint count= 0;
-
-  ut_ad(!trx->mutex_is_owner());
   /* At this point, trx->lock.trx_locks cannot be modified by other
   threads, because our transaction has been committed.
   See the checks and assertions in lock_rec_create_low() and
@@ -3945,12 +3943,21 @@ void lock_release(trx_t *trx)
   DBUG_ASSERT(trx->state == TRX_STATE_COMMITTED_IN_MEMORY);
   DBUG_ASSERT(!trx->is_referenced());
 
+  bool all_released= true;
+restart:
+  ulint count= 1000;
   lock_sys.rd_lock(SRW_LOCK_CALL);
+  trx->mutex_lock();
 
-  for (lock_t *lock= UT_LIST_GET_LAST(trx->lock.trx_locks); lock;
-       lock= UT_LIST_GET_LAST(trx->lock.trx_locks))
+  /* Note: Anywhere else, trx->mutex is not held while acquiring
+  a lock table latch, but here we are following the opposite order.
+  To avoid deadlocks, we only try to acquire the lock table latches
+  but not keep waiting for them. */
+
+  for (lock_t *lock= UT_LIST_GET_LAST(trx->lock.trx_locks); lock; )
   {
     ut_ad(lock->trx == trx);
+    lock_t *prev= UT_LIST_GET_PREV(trx_locks, lock);
     if (!lock->is_table())
     {
       ut_ad(!lock->index->table->is_temporary());
@@ -3960,11 +3967,14 @@ void lock_release(trx_t *trx)
       auto &lock_hash= lock_sys.hash_get(lock->type_mode);
       auto latch= lock_hash.lock_get
         (lock_hash.calc_hash(lock->un_member.rec_lock.page_id.fold()));
-      latch->acquire();
-      trx->mutex_lock();
-      lock_rec_dequeue_from_page(lock, false);
-      trx->mutex_unlock();
-      latch->release();
+      if (!latch->try_acquire())
+        all_released= false;
+      else
+      {
+        lock_rec_dequeue_from_page(lock, false);
+        latch->release();
+        ut_ad(!all_released || prev == UT_LIST_GET_LAST(trx->lock.trx_locks));
+      }
     }
     else
     {
@@ -3973,25 +3983,75 @@ void lock_release(trx_t *trx)
       ut_ad(table->id >= DICT_HDR_FIRST_ID ||
             (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
             trx->dict_operation);
-      table->lock_mutex_lock();
-      trx->mutex_lock();
-      lock_table_dequeue(lock, false);
-      trx->mutex_unlock();
-      table->lock_mutex_unlock();
+      if (!table->lock_mutex_trylock())
+        all_released= false;
+      else
+      {
+        lock_table_dequeue(lock, false);
+        table->lock_mutex_unlock();
+        ut_ad(!all_released || prev == UT_LIST_GET_LAST(trx->lock.trx_locks));
+      }
     }
 
-    if (count == 1000)
-    {
-      /* Release the latch for a while, so that we do not monopolize it */
-      lock_sys.rd_unlock();
-      count= 0;
-      lock_sys.rd_lock(SRW_LOCK_CALL);
-    }
-
-    ++count;
+    lock= prev;
+    if (!--count)
+      break;
   }
 
   lock_sys.rd_unlock();
+  trx->mutex_unlock();
+  if (all_released && !count)
+    goto restart;
+  return all_released;
+}
+
+/** Release the explicit locks of a committing transaction,
+and release possible other transactions waiting because of these locks. */
+void lock_release(trx_t *trx)
+{
+  ulint count;
+
+  for (count= 5; count--; )
+    if (lock_release_try(trx))
+      goto released;
+
+  /* Fall back to acquiring lock_sys.latch in exclusive mode */
+restart:
+  count= 1000;
+  lock_sys.wr_lock(SRW_LOCK_CALL);
+  trx->mutex_lock();
+
+  while (lock_t *lock= UT_LIST_GET_LAST(trx->lock.trx_locks))
+  {
+    ut_ad(lock->trx == trx);
+    if (!lock->is_table())
+    {
+      ut_ad(!lock->index->table->is_temporary());
+      ut_ad(lock->mode() != LOCK_X ||
+            lock->index->table->id >= DICT_HDR_FIRST_ID ||
+            trx->dict_operation);
+      lock_rec_dequeue_from_page(lock, false);
+    }
+    else
+    {
+      ut_d(dict_table_t *table= lock->un_member.tab_lock.table);
+      ut_ad(!table->is_temporary());
+      ut_ad(table->id >= DICT_HDR_FIRST_ID ||
+            (lock->mode() != LOCK_IX && lock->mode() != LOCK_X) ||
+            trx->dict_operation);
+      lock_table_dequeue(lock, false);
+    }
+
+    if (!--count)
+      break;
+  }
+
+  lock_sys.wr_unlock();
+  trx->mutex_unlock();
+  if (!count)
+    goto restart;
+
+released:
   trx->lock.was_chosen_as_deadlock_victim= false;
   trx->lock.n_rec_locks= 0;
 }
