@@ -491,19 +491,12 @@ const struct _ft_vft_ext ft_vft_ext_result = {innobase_fts_get_version,
 
 #ifdef HAVE_PSI_INTERFACE
 # define PSI_KEY(n) {&n##_key, #n, 0}
-/** Keys to register pthread mutexes/cond in the current file with
+/* Keys to register pthread mutexes in the current file with
 performance schema */
-static mysql_pfs_key_t	commit_cond_mutex_key;
-static mysql_pfs_key_t	commit_cond_key;
 static mysql_pfs_key_t	pending_checkpoint_mutex_key;
 
 static PSI_mutex_info	all_pthread_mutexes[] = {
-	PSI_KEY(commit_cond_mutex),
 	PSI_KEY(pending_checkpoint_mutex),
-};
-
-static PSI_cond_info	all_innodb_conds[] = {
-	PSI_KEY(commit_cond)
 };
 
 # ifdef UNIV_PFS_MUTEX
@@ -3125,7 +3118,7 @@ ha_innobase::init_table_handle_for_HANDLER(void)
 
 #ifdef WITH_INNODB_DISALLOW_WRITES
 /** Condition variable for innodb_disallow_writes */
-static mysql_cond_t allow_writes_cond;
+static pthread_cond_t allow_writes_cond;
 #endif /* WITH_INNODB_DISALLOW_WRITES */
 
 /*********************************************************************//**
@@ -3146,7 +3139,7 @@ static int innodb_init_abort()
 	srv_tmp_space.shutdown();
 
 #ifdef WITH_INNODB_DISALLOW_WRITES
-	mysql_cond_destroy(&allow_writes_cond);
+	pthread_cond_destroy(&allow_writes_cond);
 #endif /* WITH_INNODB_DISALLOW_WRITES */
 	DBUG_RETURN(1);
 }
@@ -3668,7 +3661,7 @@ static int innodb_init(void* p)
 	innodb_init_abort(). */
 
 #ifdef WITH_INNODB_DISALLOW_WRITES
-	mysql_cond_init(0, &allow_writes_cond, nullptr);
+	pthread_cond_init(&allow_writes_cond, nullptr);
 #endif /* WITH_INNODB_DISALLOW_WRITES */
 
 #ifdef HAVE_PSI_INTERFACE
@@ -3697,9 +3690,6 @@ static int innodb_init(void* p)
 	count = array_elements(all_innodb_files);
 	mysql_file_register("innodb", all_innodb_files, count);
 # endif /* UNIV_PFS_IO */
-
-	count = array_elements(all_innodb_conds);
-	mysql_cond_register("innodb", all_innodb_conds, count);
 #endif /* HAVE_PSI_INTERFACE */
 
 	bool	create_new_db = false;
@@ -3790,7 +3780,7 @@ innobase_end(handlerton*, ha_panic_function)
 
 		innodb_shutdown();
 #ifdef WITH_INNODB_DISALLOW_WRITES
-		mysql_cond_destroy(&allow_writes_cond);
+		pthread_cond_destroy(&allow_writes_cond);
 #endif /* WITH_INNODB_DISALLOW_WRITES */
 		mysql_mutex_destroy(&pending_checkpoint_mutex);
 	}
@@ -16655,7 +16645,7 @@ innodb_max_dirty_pages_pct_update(
 				    in_val);
 
 		srv_max_dirty_pages_pct_lwm = in_val;
-		mysql_cond_signal(&buf_pool.do_flush_list);
+		pthread_cond_signal(&buf_pool.do_flush_list);
 	}
 
 	srv_max_buf_pool_modified_pct = in_val;
@@ -16689,7 +16679,7 @@ innodb_max_dirty_pages_pct_lwm_update(
 	}
 
 	srv_max_dirty_pages_pct_lwm = in_val;
-	mysql_cond_signal(&buf_pool.do_flush_list);
+	pthread_cond_signal(&buf_pool.do_flush_list);
 }
 
 /*************************************************************//**
@@ -18878,7 +18868,7 @@ void innodb_wait_allow_writes()
   {
     mysql_mutex_lock(&LOCK_global_system_variables);
     while (innodb_disallow_writes)
-      mysql_cond_wait(&allow_writes_cond, &LOCK_global_system_variables);
+      my_cond_wait(&allow_writes_cond, &LOCK_global_system_variables.m_mutex);
     mysql_mutex_unlock(&LOCK_global_system_variables);
   }
 }
@@ -18894,7 +18884,7 @@ innobase_disallow_writes_update(THD*, st_mysql_sys_var*,
 	*static_cast<my_bool*>(var_ptr) = val;
 	mysql_mutex_unlock(&LOCK_global_system_variables);
 	if (!val) {
-		mysql_cond_broadcast(&allow_writes_cond);
+		pthread_cond_broadcast(&allow_writes_cond);
 	}
 	mysql_mutex_lock(&LOCK_global_system_variables);
 }
