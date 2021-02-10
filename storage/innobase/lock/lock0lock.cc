@@ -2212,7 +2212,8 @@ lock_rec_free_all_from_discard_page(const page_id_t id,
 
   while (lock)
   {
-    ut_ad(lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
+    ut_ad(&lock_hash != &lock_sys.rec_hash ||
+          lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
     ut_ad(!lock->is_waiting());
     lock_t *next_lock= lock_rec_get_next_on_page(lock);
     lock_rec_discard(lock_hash, lock);
