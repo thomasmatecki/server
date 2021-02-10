@@ -1197,7 +1197,6 @@ rtr_check_discard_page(
 
 	mysql_mutex_unlock(&index->rtr_track->rtr_active_mutex);
 
-	lock_sys.prdt_page_free_from_discard(id, false);
 	lock_sys.prdt_page_free_from_discard(id, true);
 }
 

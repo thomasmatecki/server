@@ -171,7 +171,7 @@ void lock_sys_t::assert_locked(const lock_sys_t::hash_table &hash,
   if (writer.load(std::memory_order_relaxed) == current_thread)
     return;
   ut_ad(readers);
-  //ut_ad(current_thread == page_latch_owners[get_page_latch(id)]);
+  ut_ad(hash.lock_get(lock_sys.hash(id))->is_locked());
 }
 #endif
 
@@ -2208,29 +2208,19 @@ Removes record lock objects set on an index page which is discarded. This
 function does not move locks, or check for waiting locks, therefore the
 lock bitmaps must already be reset when this function is called. */
 static void
-lock_rec_free_all_from_discard_page_low(const page_id_t id,
-                                        lock_sys_t::hash_table *lock_hash)
+lock_rec_free_all_from_discard_page(const page_id_t id,
+                                    lock_sys_t::hash_table &lock_hash)
 {
-  lock_t *lock= lock_sys.get_first(*lock_hash, id);
+  lock_t *lock= lock_sys.get_first(lock_hash, id);
 
   while (lock)
   {
     ut_ad(lock_rec_find_set_bit(lock) == ULINT_UNDEFINED);
     ut_ad(!lock->is_waiting());
     lock_t *next_lock= lock_rec_get_next_on_page(lock);
-    lock_rec_discard(*lock_hash, lock);
+    lock_rec_discard(lock_hash, lock);
     lock= next_lock;
   }
-}
-
-/** Remove record locks for an index page which is discarded. This
-function does not move locks, or check for waiting locks, therefore the
-lock bitmaps must already be reset when this function is called. */
-void lock_rec_free_all_from_discard_page(const page_id_t page_id)
-{
-  lock_rec_free_all_from_discard_page_low(page_id, &lock_sys.rec_hash);
-  lock_rec_free_all_from_discard_page_low(page_id, &lock_sys.prdt_hash);
-  lock_rec_free_all_from_discard_page_low(page_id, &lock_sys.prdt_page_hash);
 }
 
 /*============= RECORD LOCK MOVING AND INHERITING ===================*/
@@ -2240,13 +2230,11 @@ Resets the lock bits for a single record. Releases transactions waiting for
 lock requests here. */
 static
 void
-lock_rec_reset_and_release_wait_low(
-/*================================*/
-	lock_sys_t::hash_table*	hash,	/*!< in: hash table */
+lock_rec_reset_and_release_wait(
 	const page_id_t		id,	/*!< in: page identifier */
 	ulint			heap_no)/*!< in: heap number of record */
 {
-  for (lock_t *lock= lock_sys.get_first(*hash, id, heap_no); lock;
+  for (lock_t *lock= lock_sys.get_first(lock_sys.rec_hash, id, heap_no); lock;
        lock= lock_rec_get_next(heap_no, lock))
   {
     if (lock->is_waiting())
@@ -2259,25 +2247,6 @@ lock_rec_reset_and_release_wait_low(
       lock_trx->mutex_unlock();
     }
   }
-}
-
-/*************************************************************//**
-Resets the lock bits for a single record. Releases transactions waiting for
-lock requests here. */
-static
-void
-lock_rec_reset_and_release_wait(
-/*============================*/
-	const page_id_t		id,	/*!< in: page identifier */
-	ulint			heap_no)/*!< in: heap number of record */
-{
-	lock_rec_reset_and_release_wait_low(
-		&lock_sys.rec_hash, id, heap_no);
-
-	lock_rec_reset_and_release_wait_low(
-		&lock_sys.prdt_hash, id, PAGE_HEAP_NO_INFIMUM);
-	lock_rec_reset_and_release_wait_low(
-		&lock_sys.prdt_page_hash, id, PAGE_HEAP_NO_INFIMUM);
 }
 
 /*************************************************************//**
@@ -2943,6 +2912,23 @@ lock_update_split_right(
   lock_rec_inherit_to_gap(l, r, left_block->frame, PAGE_HEAP_NO_SUPREMUM, h);
 }
 
+#ifdef UNIV_DEBUG
+static void lock_assert_no_spatial(const page_id_t id)
+{
+  auto fold= lock_sys.hash(id);
+  auto latch= lock_sys.prdt_page_hash.lock_get(fold);
+  latch->acquire();
+  /* there should exist no page lock on the left page,
+  otherwise, it will be blocked from merge */
+  ut_ad(!lock_sys.get_first(lock_sys.prdt_page_hash, id));
+  latch->release();
+  latch= lock_sys.prdt_hash.lock_get(fold);
+  latch->acquire();
+  ut_ad(!lock_sys.get_first(lock_sys.prdt_hash, id));
+  latch->release();
+}
+#endif
+
 /*************************************************************//**
 Updates the lock table when a page is merged to the right. */
 void
@@ -2958,31 +2944,25 @@ lock_update_merge_right(
 						page which will be
 						discarded */
 {
-	ut_ad(!page_rec_is_metadata(orig_succ));
+  ut_ad(!page_rec_is_metadata(orig_succ));
 
-	const page_id_t l{left_block->page.id()};
-	const page_id_t r{right_block->page.id()};
-	LockMultiGuard g{lock_sys.rec_hash, l, r};
+  const page_id_t l{left_block->page.id()};
+  const page_id_t r{right_block->page.id()};
+  LockMultiGuard g{lock_sys.rec_hash, l, r};
 
-	/* Inherit the locks from the supremum of the left page to the
-	original successor of infimum on the right page, to which the left
-	page was merged */
+  /* Inherit the locks from the supremum of the left page to the
+  original successor of infimum on the right page, to which the left
+  page was merged */
+  lock_rec_inherit_to_gap(r, l, right_block->frame,
+                          page_rec_get_heap_no(orig_succ),
+                          PAGE_HEAP_NO_SUPREMUM);
 
-	lock_rec_inherit_to_gap(r, l, right_block->frame,
-				page_rec_get_heap_no(orig_succ),
-				PAGE_HEAP_NO_SUPREMUM);
+  /* Reset the locks on the supremum of the left page, releasing
+  waiting transactions */
+  lock_rec_reset_and_release_wait(l, PAGE_HEAP_NO_SUPREMUM);
+  lock_rec_free_all_from_discard_page(l, lock_sys.rec_hash);
 
-	/* Reset the locks on the supremum of the left page, releasing
-	waiting transactions */
-
-	lock_rec_reset_and_release_wait_low(
-		&lock_sys.rec_hash, l, PAGE_HEAP_NO_SUPREMUM);
-
-	/* there should exist no page lock on the left page,
-	otherwise, it will be blocked from merge */
-	ut_ad(!lock_sys.get_first_prdt_page(l));
-
-	lock_rec_free_all_from_discard_page(l);
+  ut_d(lock_assert_no_spatial(l));
 }
 
 /** Update locks when the root page is copied to another in
@@ -3006,7 +2986,7 @@ void lock_update_copy_and_discard(const buf_block_t &new_block, page_id_t old)
   LockMultiGuard g{lock_sys.rec_hash, new_block.page.id(), old};
   /* Move the locks on the supremum of the old page to the supremum of new */
   lock_rec_move(new_block, old, PAGE_HEAP_NO_SUPREMUM, PAGE_HEAP_NO_SUPREMUM);
-  lock_rec_free_all_from_discard_page(old);
+  lock_rec_free_all_from_discard_page(old, lock_sys.rec_hash);
 }
 
 /*************************************************************//**
@@ -3050,18 +3030,17 @@ void lock_update_merge_left(const buf_block_t& left, const rec_t *orig_pred,
 
     /* Reset the locks on the supremum of the left page,
     releasing waiting transactions */
-    lock_rec_reset_and_release_wait_low(&lock_sys.rec_hash, l,
-                                        PAGE_HEAP_NO_SUPREMUM);
+    lock_rec_reset_and_release_wait(l, PAGE_HEAP_NO_SUPREMUM);
   }
 
   /* Move the locks from the supremum of right page to the supremum
   of the left page */
   lock_rec_move(left, right, PAGE_HEAP_NO_SUPREMUM, PAGE_HEAP_NO_SUPREMUM);
+  lock_rec_free_all_from_discard_page(right, lock_sys.rec_hash);
 
   /* there should exist no page lock on the right page,
   otherwise, it will be blocked from merge */
-  ut_ad(!lock_sys.get_first_prdt_page(right));
-  lock_rec_free_all_from_discard_page(right);
+  ut_d(lock_assert_no_spatial(right));
 }
 
 /*************************************************************//**
@@ -3107,8 +3086,7 @@ lock_update_discard(
 	LockMultiGuard	g{lock_sys.rec_hash, heir, page_id};
 
 	if (lock_sys.get_first(page_id)) {
-		ut_ad(!lock_sys.get_first_prdt(page_id));
-		ut_ad(!lock_sys.get_first_prdt_page(page_id));
+		ut_d(lock_assert_no_spatial(page_id));
 		/* Inherit all the locks on the page to the record and
 		reset all the locks on the page */
 
@@ -3144,13 +3122,20 @@ lock_update_discard(
 			} while (heap_no != PAGE_HEAP_NO_SUPREMUM);
 		}
 
-		lock_rec_free_all_from_discard_page_low(page_id,
-							&lock_sys.rec_hash);
+		lock_rec_free_all_from_discard_page(page_id,
+						    lock_sys.rec_hash);
 	} else {
-		lock_rec_free_all_from_discard_page_low(page_id,
-							&lock_sys.prdt_hash);
-		lock_rec_free_all_from_discard_page_low(
-			page_id, &lock_sys.prdt_page_hash);
+		const auto latch_fold = lock_sys.hash(page_id);
+		auto latch = lock_sys.prdt_hash.lock_get(latch_fold);
+		latch->acquire();
+		lock_rec_free_all_from_discard_page(page_id,
+						    lock_sys.prdt_hash);
+		latch->release();
+		latch= lock_sys.prdt_page_hash.lock_get(latch_fold);
+		latch->acquire();
+		lock_rec_free_all_from_discard_page(
+			page_id, lock_sys.prdt_page_hash);
+		latch->release();
 	}
 }
 
@@ -3220,7 +3205,6 @@ lock_update_delete(
 	lock_rec_inherit_to_gap(id, id, block->frame, next_heap_no, heap_no);
 
 	/* Reset the lock bits on rec and release waiting transactions */
-
 	lock_rec_reset_and_release_wait(id, heap_no);
 }
 
@@ -6263,32 +6247,29 @@ lock_update_split_and_merge(
 					supremum on the left page before merge*/
 	const buf_block_t* right_block)	/*!< in: right page from which merged */
 {
-	const rec_t* left_next_rec;
+  ut_ad(page_is_leaf(left_block->frame));
+  ut_ad(page_is_leaf(right_block->frame));
+  ut_ad(page_align(orig_pred) == left_block->frame);
 
-	ut_ad(page_is_leaf(left_block->frame));
-	ut_ad(page_is_leaf(right_block->frame));
-	ut_ad(page_align(orig_pred) == left_block->frame);
+  const page_id_t l{left_block->page.id()};
+  const page_id_t r{right_block->page.id()};
 
-	const page_id_t l{left_block->page.id()};
-	const page_id_t r{right_block->page.id()};
-	LockMultiGuard g{lock_sys.rec_hash, l, r};
+  LockMultiGuard g{lock_sys.rec_hash, l, r};
+  const rec_t *left_next_rec= page_rec_get_next_const(orig_pred);
+  ut_ad(!page_rec_is_metadata(left_next_rec));
 
-	left_next_rec = page_rec_get_next_const(orig_pred);
-	ut_ad(!page_rec_is_metadata(left_next_rec));
+  /* Inherit the locks on the supremum of the left page to the
+  first record which was moved from the right page */
+  lock_rec_inherit_to_gap(l, l, left_block->frame,
+                          page_rec_get_heap_no(left_next_rec),
+                          PAGE_HEAP_NO_SUPREMUM);
 
-	/* Inherit the locks on the supremum of the left page to the
-	first record which was moved from the right page */
-	lock_rec_inherit_to_gap(l, l, left_block->frame,
-				page_rec_get_heap_no(left_next_rec),
-				PAGE_HEAP_NO_SUPREMUM);
+  /* Reset the locks on the supremum of the left page,
+  releasing waiting transactions */
+  lock_rec_reset_and_release_wait(l, PAGE_HEAP_NO_SUPREMUM);
 
-	/* Reset the locks on the supremum of the left page,
-	releasing waiting transactions */
-	lock_rec_reset_and_release_wait(l, PAGE_HEAP_NO_SUPREMUM);
-
-	/* Inherit the locks to the supremum of the left page from the
-	successor of the infimum on the right page */
-	lock_rec_inherit_to_gap(l, r, left_block->frame,
-				PAGE_HEAP_NO_SUPREMUM,
-				lock_get_min_heap_no(right_block));
+  /* Inherit the locks to the supremum of the left page from the
+  successor of the infimum on the right page */
+  lock_rec_inherit_to_gap(l, r, left_block->frame, PAGE_HEAP_NO_SUPREMUM,
+                          lock_get_min_heap_no(right_block));
 }

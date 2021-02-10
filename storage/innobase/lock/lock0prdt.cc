@@ -612,9 +612,6 @@ lock_prdt_update_split_low(
 {
 	lock_t*		lock;
 
-	// FIXME: acquire the lock!
-	lock_sys.assert_locked(lock_sys.hash_get(type_mode), page_id);
-
 	for (lock = lock_sys.get_first(type_mode, page_id);
 	     lock;
 	     lock = lock_rec_get_next_on_page(lock)) {
@@ -660,13 +657,12 @@ lock_prdt_update_split(
 	lock_prdt_t*	new_prdt,	/*!< in: MBR on the new page */
 	const page_id_t	page_id)	/*!< in: page number */
 {
-	lock_sys.rd_lock(SRW_LOCK_CALL);
+	LockMutexGuard g{SRW_LOCK_CALL};
 	lock_prdt_update_split_low(new_block, prdt, new_prdt,
 				   page_id, LOCK_PREDICATE);
 
 	lock_prdt_update_split_low(new_block, NULL, NULL,
 				   page_id, LOCK_PRDT_PAGE);
-	lock_sys.rd_unlock();
 }
 
 /*********************************************************************//**
@@ -897,18 +893,43 @@ lock_prdt_rec_move(
 
 /** Remove locks on a discarded SPATIAL INDEX page.
 @param id   page to be discarded
-@param page whether to use lock_sys.prdt_page_hash */
-void lock_sys_t::prdt_page_free_from_discard(const page_id_t id, bool page)
+@param page whether to discard also from lock_sys.prdt_hash */
+void lock_sys_t::prdt_page_free_from_discard(const page_id_t id, bool all)
 {
-  auto &hash= prdt_hash_get(page);
   rd_lock(SRW_LOCK_CALL);
-  auto latch= hash.lock_get(lock_sys.hash(id));
+  const auto fold= lock_sys.hash(id);
+  auto latch= prdt_page_hash.lock_get(fold);
   latch->acquire();
 
-  for (lock_t *lock= lock_sys.get_first(hash, id), *next; lock; lock= next)
+  for (lock_t *lock= lock_sys.get_first(prdt_page_hash, id), *next; lock;
+       lock= next)
   {
     next= lock_rec_get_next_on_page(lock);
-    lock_rec_discard(hash, lock);
+    lock_rec_discard(prdt_page_hash, lock);
+  }
+
+  if (all)
+  {
+    latch->release();
+    latch= prdt_hash.lock_get(fold);
+    latch->acquire();
+    for (lock_t *lock= lock_sys.get_first(prdt_hash, id), *next; lock;
+         lock= next)
+    {
+      next= lock_rec_get_next_on_page(lock);
+      lock_rec_discard(prdt_hash, lock);
+    }
+  }
+
+  latch->release();
+  latch= rec_hash.lock_get(fold);
+  latch->acquire();
+
+  for (lock_t *lock= lock_sys.get_first(rec_hash, id), *next; lock;
+       lock= next)
+  {
+    next= lock_rec_get_next_on_page(lock);
+    lock_rec_discard(rec_hash, lock);
   }
 
   rd_unlock();

@@ -880,8 +880,8 @@ public:
 
   /** Remove locks on a discarded SPATIAL INDEX page.
   @param id   page to be discarded
-  @param page whether to use lock_sys.prdt_page_hash */
-  void prdt_page_free_from_discard(const page_id_t id, bool page);
+  @param page whether to discard also from lock_sys.prdt_hash */
+  void prdt_page_free_from_discard(const page_id_t id, bool all= false);
 };
 
 /** The lock system */
@@ -1035,11 +1035,6 @@ lock_rtr_move_rec_list(
 	rtr_rec_move_t*		rec_move,	/*!< in: recording records
 						moved */
 	ulint			num_move);	/*!< in: num of rec to move */
-
-/** Remove record locks for an index page which is discarded. This
-function does not move locks, or check for waiting locks, therefore the
-lock bitmaps must already be reset when this function is called. */
-void lock_rec_free_all_from_discard_page(const page_id_t page_id);
 
 /** Cancel a waiting lock request and release possibly waiting transactions */
 void lock_cancel_waiting_and_release(lock_t *lock);
