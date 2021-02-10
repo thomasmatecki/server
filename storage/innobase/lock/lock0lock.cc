@@ -93,7 +93,7 @@ void lock_sys_t::hash_table::resize(ulint n)
   {
     if (lock_t *lock= static_cast<lock_t*>(array[i].node))
     {
-      ut_ad(i % ELEMENTS_PER_LATCH);
+      ut_ad(i % (ELEMENTS_PER_LATCH + 1)); /* all hash_latch must vacated */
       do
       {
         ut_ad(!lock->is_table());
