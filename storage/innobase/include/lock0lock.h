@@ -611,8 +611,8 @@ public:
     static constexpr size_t ELEMENTS_PER_LATCH= CPU_LEVEL1_DCACHE_LINESIZE /
       sizeof(void*) - 1;
 
-    /** number of payload elements in array[] */
-    Atomic_relaxed<ulint> n_cells;
+    /** number of payload elements in array[]. Protected by lock_sys.latch. */
+    ulint n_cells;
     /** the hash table, with pad(n_cells) elements, aligned to L1 cache size */
     hash_cell_t *array;
 
@@ -620,13 +620,19 @@ public:
     @param n  the lower bound of n_cells */
     void create(ulint n);
 
+    /** Resize the hash table.
+    @param n  the lower bound of n_cells */
+    void resize(ulint n);
+
     /** Free the hash table. */
     void free() { aligned_free(array); array= nullptr; }
 
     /** @return the index of an array element */
-    ulint calc_hash(ulint fold) const { return calc_hash(fold, n_cells); }
+    inline ulint calc_hash(ulint fold) const;
     /** @return raw array index converted to padded index */
     static ulint pad(ulint h) { return 1 + (h / ELEMENTS_PER_LATCH) + h; }
+    /** Get a latch. */
+    inline hash_latch *lock_get(ulint fold) const;
   private:
     /** @return the hash value before any ELEMENTS_PER_LATCH padding */
     static ulint hash(ulint fold, ulint n) { return ut_hash_ulint(fold, n); }
@@ -644,10 +650,6 @@ public:
       return reinterpret_cast<hash_latch*>
         (&array[calc_hash(fold, n) & ~ELEMENTS_PER_LATCH]);
     }
-  public:
-    /** Get a latch. */
-    hash_latch *lock_get(ulint fold) const
-    { return lock_get(fold, n_cells); }
   };
 
 private:
@@ -884,6 +886,21 @@ public:
 
 /** The lock system */
 extern lock_sys_t lock_sys;
+
+/** @return the index of an array element */
+inline ulint lock_sys_t::hash_table::calc_hash(ulint fold) const
+{
+  ut_ad(lock_sys.is_writer() || lock_sys.readers);
+  return calc_hash(fold, n_cells);
+}
+
+/** Get a latch. */
+inline
+lock_sys_t::hash_latch *lock_sys_t::hash_table::lock_get(ulint fold) const
+{
+  ut_ad(lock_sys.is_writer() || lock_sys.readers);
+  return lock_get(fold, n_cells);
+}
 
 /** lock_sys.latch guard */
 struct LockMutexGuard

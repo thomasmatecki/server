@@ -901,8 +901,8 @@ lock_prdt_rec_move(
 void lock_sys_t::prdt_page_free_from_discard(const page_id_t id, bool page)
 {
   auto &hash= prdt_hash_get(page);
-  auto latch= hash.lock_get(lock_sys.hash(id));
   rd_lock(SRW_LOCK_CALL);
+  auto latch= hash.lock_get(lock_sys.hash(id));
   latch->acquire();
 
   for (lock_t *lock= lock_sys.get_first(hash, id), *next; lock; lock= next)

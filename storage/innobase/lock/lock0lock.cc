@@ -78,6 +78,47 @@ void lock_sys_t::hash_table::create(ulint n)
   array= static_cast<hash_cell_t*>(v);
 }
 
+/** Resize the hash table.
+@param n  the lower bound of n_cells */
+void lock_sys_t::hash_table::resize(ulint n)
+{
+  ut_ad(lock_sys.is_writer());
+  ulint new_n_cells= ut_find_prime(n);
+  const size_t size= pad(new_n_cells) * sizeof *array;
+  void* v= aligned_malloc(size, CPU_LEVEL1_DCACHE_LINESIZE);
+  memset(v, 0, size);
+  hash_cell_t *new_array= static_cast<hash_cell_t*>(v);
+
+  for (auto i= pad(n_cells); i--; )
+  {
+    if (lock_t *lock= static_cast<lock_t*>(array[i].node))
+    {
+      ut_ad(i % ELEMENTS_PER_LATCH);
+      do
+      {
+        ut_ad(!lock->is_table());
+        hash_cell_t *c= calc_hash(lock->un_member.rec_lock.page_id.fold(),
+                                  new_n_cells) + new_array;
+        if (!c->node)
+          c->node= lock;
+        else
+        {
+          while (lock_t *next= static_cast<lock_t*>(c->node)->hash)
+            c->node= next;
+          static_cast<lock_t*>(c->node)->hash= lock;
+        }
+        lock_t *next= lock->hash;
+        lock->hash= nullptr;
+        lock= next;
+      }
+      while (lock);
+    }
+  }
+
+  array= new_array;
+  n_cells= new_n_cells;
+}
+
 #if defined SRW_LOCK_DUMMY && !defined _WIN32
 void lock_sys_t::hash_latch::wait()
 {
@@ -178,11 +219,11 @@ LockMultiGuard::LockMultiGuard(lock_sys_t::hash_table &hash,
                                const page_id_t id1, const page_id_t id2)
 {
   ut_ad(id1.space() == id2.space());
+  lock_sys.rd_lock(SRW_LOCK_CALL);
   latch1= hash.lock_get(lock_sys.hash(id1));
   latch2= hash.lock_get(lock_sys.hash(id2));
   if (latch1 > latch2)
     std::swap(latch1, latch2);
-  lock_sys.rd_lock(SRW_LOCK_CALL);
   latch1->acquire();
   if (latch1 != latch2)
     latch2->acquire();
@@ -528,15 +569,6 @@ void lock_sys_t::rd_unlock()
 }
 #endif
 
-/** Calculates the fold value of a lock: used in migrating the hash table.
-@param[in]	lock	record lock object
-@return	folded value */
-static ulint lock_rec_lock_fold(const lock_t *lock)
-{
-  return lock->un_member.rec_lock.page_id.fold();
-}
-
-
 /**
   Resize the lock hash table.
 
@@ -544,29 +576,12 @@ static ulint lock_rec_lock_fold(const lock_t *lock)
 */
 void lock_sys_t::resize(ulint n_cells)
 {
-	ut_ad(this == &lock_sys);
-
-	LockMutexGuard g{SRW_LOCK_CALL};
-
-	hash_table old_hash(rec_hash);
-	rec_hash.create(n_cells);
-	HASH_MIGRATE(&old_hash, &rec_hash, lock_t, hash,
-		     lock_rec_lock_fold);
-	old_hash.free();
-
-	old_hash = prdt_hash;
-	prdt_hash.create(n_cells);
-	HASH_MIGRATE(&old_hash, &prdt_hash, lock_t, hash,
-		     lock_rec_lock_fold);
-	old_hash.free();
-
-	old_hash = prdt_page_hash;
-	prdt_page_hash.create(n_cells);
-	HASH_MIGRATE(&old_hash, &prdt_page_hash, lock_t, hash,
-		     lock_rec_lock_fold);
-	old_hash.free();
+  ut_ad(this == &lock_sys);
+  LockMutexGuard g{SRW_LOCK_CALL};
+  rec_hash.resize(n_cells);
+  prdt_hash.resize(n_cells);
+  prdt_page_hash.resize(n_cells);
 }
-
 
 /** Closes the lock system at database shutdown. */
 void lock_sys_t::close()
@@ -1453,8 +1468,9 @@ lock_rec_create_low(
 	lock_rec_bitmap_reset(lock);
 	lock_rec_set_nth_bit(lock, heap_no);
 	index->table->n_rec_locks++;
-	ut_ad(index->table->get_ref_count() > 0 || !index->table->can_be_evicted);
+	ut_ad(index->table->get_ref_count() || !index->table->can_be_evicted);
 
+	const auto lock_hash = &lock_sys.hash_get(type_mode);
 #ifdef WITH_WSREP
 	if (c_lock && trx->is_wsrep()
 	    && wsrep_thd_is_BF(trx->mysql_thd, FALSE)) {
@@ -1465,8 +1481,7 @@ lock_rec_create_low(
 		}
 	} else
 #endif /* WITH_WSREP */
-	HASH_INSERT(lock_t, hash, &lock_sys.hash_get(type_mode),
-		    page_id.fold(), lock);
+	HASH_INSERT(lock_t, hash, lock_hash, page_id.fold(), lock);
 
 	if (type_mode & LOCK_WAIT) {
 		ut_ad(!trx->lock.wait_lock
