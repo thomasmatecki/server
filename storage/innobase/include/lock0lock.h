@@ -633,6 +633,13 @@ public:
     static ulint pad(ulint h) { return 1 + (h / ELEMENTS_PER_LATCH) + h; }
     /** Get a latch. */
     inline hash_latch *lock_get(ulint fold) const;
+
+#ifdef UNIV_DEBUG
+    void assert_locked(const page_id_t id) const;
+#else
+    void assert_locked(const page_id_t) const {}
+#endif
+
   private:
     /** @return the hash value before any ELEMENTS_PER_LATCH padding */
     static ulint hash(ulint fold, ulint n) { return ut_hash_ulint(fold, n); }
@@ -766,14 +773,11 @@ public:
 #ifdef UNIV_DEBUG
   /** Assert that a lock shard is exclusively latched by this thread */
   void assert_locked(const lock_t &lock) const;
-  /** Assert that a lock shard is exclusively latched by this thread */
-  void assert_locked(const hash_table &table, const page_id_t id) const;
   /** Assert that a table lock shard is exclusively latched by this thread */
   void assert_locked(const dict_table_t &table) const;
 #else
   void assert_locked(const lock_t &) const {}
   void assert_locked(const dict_table_t &) const {}
-  void assert_locked(const hash_table &, const page_id_t) const {}
 #endif
 
   /**
@@ -836,7 +840,7 @@ public:
   {
     ut_ad(&lock_hash == &rec_hash || &lock_hash == &prdt_hash ||
           &lock_hash == &prdt_page_hash);
-    assert_locked(lock_hash, id);
+    lock_hash.assert_locked(id);
     for (lock_t *lock= static_cast<lock_t*>
          (HASH_GET_FIRST(&lock_hash, hash(id)));
          lock; lock= static_cast<lock_t*>(HASH_GET_NEXT(hash, lock)))

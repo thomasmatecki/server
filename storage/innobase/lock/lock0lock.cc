@@ -147,8 +147,8 @@ void lock_sys_t::assert_locked(const lock_t &lock) const
   if (lock.is_table())
     assert_locked(*lock.un_member.tab_lock.table);
   else
-    assert_locked(lock_sys.hash_get(lock.type_mode),
-                  lock.un_member.rec_lock.page_id);
+    lock_sys.hash_get(lock.type_mode).
+      assert_locked(lock.un_member.rec_lock.page_id);
 }
 
 /** Assert that a table lock shard is exclusively latched by this thread */
@@ -164,14 +164,12 @@ void lock_sys_t::assert_locked(const dict_table_t &table) const
 }
 
 /** Assert that a page shard is exclusively latched by this thread */
-void lock_sys_t::assert_locked(const lock_sys_t::hash_table &hash,
-                               const page_id_t id) const
+void lock_sys_t::hash_table::assert_locked(const page_id_t id) const
 {
-  const os_thread_id_t current_thread= os_thread_get_curr_id();
-  if (writer.load(std::memory_order_relaxed) == current_thread)
+  if (lock_sys.is_writer())
     return;
-  ut_ad(readers);
-  ut_ad(hash.lock_get(lock_sys.hash(id))->is_locked());
+  ut_ad(lock_sys.readers);
+  ut_ad(lock_get(calc_hash(id.fold()))->is_locked());
 }
 #endif
 
@@ -1396,7 +1394,7 @@ lock_rec_create_low(
 	lock_t*		lock;
 	ulint		n_bytes;
 
-	lock_sys.assert_locked(lock_sys.hash_get(type_mode), page_id);
+	lock_sys.hash_get(type_mode).assert_locked(page_id);
 	ut_ad(holds_trx_mutex == trx->mutex_is_owner());
 	ut_ad(dict_index_is_clust(index) || !dict_index_is_online_ddl(index));
 	ut_ad(!(type_mode & LOCK_TABLE));
@@ -1523,7 +1521,7 @@ lock_rec_enqueue_waiting(
 	que_thr_t*		thr,
 	lock_prdt_t*		prdt)
 {
-	lock_sys.assert_locked(lock_sys.hash_get(type_mode), id);
+	lock_sys.hash_get(type_mode).assert_locked(id);
 	ut_ad(!srv_read_only_mode);
 	ut_ad(dict_index_is_clust(index) || !dict_index_is_online_ddl(index));
 
@@ -1588,8 +1586,7 @@ lock_rec_find_similar_on_page(
 	lock_t*         lock,           /*!< in: lock_sys.get_first() */
 	const trx_t*    trx)            /*!< in: transaction */
 {
-	lock_sys.assert_locked(lock_sys.rec_hash,
-			       lock->un_member.rec_lock.page_id);
+	lock_sys.rec_hash.assert_locked(lock->un_member.rec_lock.page_id);
 
 	for (/* No op */;
 	     lock != NULL;
@@ -1630,7 +1627,7 @@ lock_rec_add_to_queue(
 					/*!< in: TRUE if caller owns the
 					transaction mutex */
 {
-	lock_sys.assert_locked(lock_sys.hash_get(type_mode), id);
+	lock_sys.hash_get(type_mode).assert_locked(id);
 	ut_ad(caller_owns_trx_mutex == trx->mutex_is_owner());
 	ut_ad(index->is_primary()
 	      || dict_index_get_online_status(index) != ONLINE_INDEX_CREATION);
@@ -2104,8 +2101,8 @@ static void lock_rec_cancel(lock_t *lock)
   mysql_mutex_lock(&lock_sys.wait_mutex);
   trx->mutex_lock();
 
-  lock_sys.assert_locked(lock_sys.hash_get(lock->type_mode),
-                         lock->un_member.rec_lock.page_id);
+  lock_sys.hash_get(lock->type_mode).
+    assert_locked(lock->un_member.rec_lock.page_id);
   /* Reset the bit (there can be only one set bit) in the lock bitmap */
   lock_rec_reset_nth_bit(lock, lock_rec_find_set_bit(lock));
 
@@ -2132,7 +2129,7 @@ static void lock_rec_dequeue_from_page(lock_t *in_lock, bool owns_wait_mutex)
 
 	const page_id_t page_id{in_lock->un_member.rec_lock.page_id};
 	auto& lock_hash = lock_sys.hash_get(in_lock->type_mode);
-	lock_sys.assert_locked(lock_hash, page_id);
+	lock_hash.assert_locked(page_id);
 	ut_ad(lock_sys.is_writer() || in_lock->trx->mutex_is_owner());
 
 	ut_d(auto old_n_locks=)
@@ -2188,7 +2185,7 @@ static void lock_rec_dequeue_from_page(lock_t *in_lock, bool owns_wait_mutex)
 void lock_rec_discard(lock_sys_t::hash_table &lock_hash, lock_t *in_lock)
 {
   ut_ad(!in_lock->is_table());
-  lock_sys.assert_locked(lock_hash, in_lock->un_member.rec_lock.page_id);
+  lock_hash.assert_locked(in_lock->un_member.rec_lock.page_id);
 
   HASH_DELETE(lock_t, hash, &lock_hash,
               in_lock->un_member.rec_lock.page_id.fold(), in_lock);
@@ -4078,7 +4075,7 @@ static void lock_rec_print(FILE* file, const lock_t* lock, mtr_t& mtr)
 	ut_ad(!lock->is_table());
 
 	const page_id_t page_id{lock->un_member.rec_lock.page_id};
-	lock_sys.assert_locked(lock_sys.hash_get(lock->type_mode), page_id);
+	lock_sys.hash_get(lock->type_mode).assert_locked(page_id);
 
 	fprintf(file, "RECORD LOCKS space id %u page no %u n bits " ULINTPF
 		" index %s of table ",
@@ -4459,7 +4456,7 @@ lock_rec_queue_validate(
 		lock_sys.wr_lock(SRW_LOCK_CALL);
 	}
 
-	lock_sys.assert_locked(lock_sys.rec_hash, id);
+	lock_sys.rec_hash.assert_locked(id);
 
 	if (!page_rec_is_user_rec(rec)) {
 
