@@ -799,7 +799,7 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   mysql_mutex_init(key_LOCK_wakeup_ready, &LOCK_wakeup_ready, MY_MUTEX_INIT_FAST);
   mysql_mutex_init(key_LOCK_thd_kill, &LOCK_thd_kill, MY_MUTEX_INIT_FAST);
   mysql_cond_init(key_COND_wakeup_ready, &COND_wakeup_ready, 0);
-  mysql_mutex_record_order(&LOCK_thd_data, &LOCK_thd_kill);
+  mysql_mutex_record_order(&LOCK_thd_kill, &LOCK_thd_data);
 
   /* Variables with default values */
   proc_info="login";
