@@ -1185,7 +1185,6 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
     switch (ddl_log_entry->phase) {
     case DDL_RENAME_PHASE_TRIGGER:
     {
-      int error;
       MDL_request mdl_request;
 
       build_filename_and_delete_tmp_file(to_path, sizeof(to_path),
@@ -1594,7 +1593,7 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
   case DDL_LOG_CREATE_VIEW_ACTION:
   {
     char *path= (char*) ddl_log_entry->tmp_name.str;
-    uint path_length= ddl_log_entry->tmp_name.length;
+    size_t path_length= ddl_log_entry->tmp_name.length;
 
     path[path_length+1]= 0;               // Prepare for extending
 
@@ -1647,8 +1646,9 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
   case DDL_LOG_DELETE_TMP_FILE_ACTION:
   {
     LEX_CSTRING path= ddl_log_entry->tmp_name;
+    DBUG_ASSERT(ddl_log_entry->unique_id <= UINT_MAX32);
     if (!ddl_log_entry->unique_id ||
-        !is_execute_entry_active(ddl_log_entry->unique_id))
+        !is_execute_entry_active((uint) ddl_log_entry->unique_id))
       mysql_file_delete(key_file_fileparser, path.str,
                         MYF(MY_WME|MY_IGNORE_ENOENT));
     (void) update_phase(entry_pos, DDL_LOG_FINAL_PHASE);

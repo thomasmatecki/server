@@ -657,7 +657,7 @@ void build_lower_case_table_filename(char *buff, size_t bufflen,
   my_casedn_str(files_charset_info, table_name);
 
   build_table_filename(buff, bufflen, db_name, table_name, "",
-                       flags & FN_FROM_IS_TMP);
+                       flags & FN_IS_TMP);
 }
 
 
