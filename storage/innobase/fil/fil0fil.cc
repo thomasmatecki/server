@@ -48,6 +48,10 @@ Created 10/25/1995 Heikki Tuuri
 #include "ibuf0ibuf.h"
 #include "buf0flu.h"
 #ifdef UNIV_LINUX
+# ifdef HAVE_LINUX_UNISTD_H
+#  include <unistd.h>
+# endif
+# include <fcntl.h>
 # include <sys/types.h>
 # include <sys/sysmacros.h>
 # include <dirent.h>
@@ -3210,10 +3214,17 @@ inline void fil_node_t::complete_write()
 {
   mysql_mutex_assert_not_owner(&fil_system.mutex);
 
-  if (space->purpose != FIL_TYPE_TEMPORARY &&
-      srv_file_flush_method != SRV_O_DIRECT_NO_FSYNC &&
-      space->set_needs_flush())
-  {
+  if (space->purpose == FIL_TYPE_TEMPORARY)
+    return;
+  switch (srv_file_flush_method) {
+  case SRV_O_DIRECT_NO_FSYNC:
+#if !defined UNIV_SOLARIS && defined O_DSYNC
+  case SRV_O_DIRECT:
+#endif
+    return;
+  default:
+    if (space->set_needs_flush())
+      return;
     mysql_mutex_lock(&fil_system.mutex);
     if (!space->is_in_unflushed_spaces)
     {
