@@ -708,7 +708,7 @@ btr_search_update_hash_ref(
 	}
 
 	ut_ad(block->page.id().space() == index->table->space_id);
-	ut_ad(index == cursor->index);
+	ut_ad(index->id == cursor->index->id);
 	ut_ad(!dict_index_is_ibuf(index));
 	auto part = btr_search_sys.get_part(*index);
 	rw_lock_x_lock(&part->latch);
@@ -1722,7 +1722,7 @@ btr_search_move_or_delete_hash_entries(
 	if (!index) {
 		index = new_block->index;
 	} else {
-		ut_ad(!new_block->index || index == new_block->index);
+		ut_ad(!new_block->index || index->id == new_block->index->id);
 	}
 	assert_block_ahi_valid(block);
 	assert_block_ahi_valid(new_block);
@@ -1802,7 +1802,7 @@ void btr_search_update_hash_on_delete(btr_cur_t* cursor)
 	}
 
 	ut_ad(block->page.id().space() == index->table->space_id);
-	ut_a(index == cursor->index);
+	ut_a(index->id == cursor->index->id);
 	ut_a(block->curr_n_fields > 0 || block->curr_n_bytes > 0);
 	ut_ad(!dict_index_is_ibuf(index));
 
@@ -1871,7 +1871,7 @@ btr_search_update_hash_node_on_insert(btr_cur_t* cursor, rw_lock_t* ahi_latch)
 		return;
 	}
 
-	ut_a(cursor->index == index);
+	ut_a(cursor->index->id == index->id);
 	ut_ad(!dict_index_is_ibuf(index));
 	rw_lock_x_lock(ahi_latch);
 
@@ -1959,7 +1959,7 @@ btr_search_update_hash_on_insert(btr_cur_t* cursor, rw_lock_t* ahi_latch)
 #ifdef MYSQL_INDEX_DISABLE_AHI
 	ut_a(!index->disable_ahi);
 #endif
-	ut_a(index == cursor->index);
+	ut_a(index->id == cursor->index->id);
 	ut_ad(!dict_index_is_ibuf(index));
 
 	n_fields = block->curr_n_fields;
