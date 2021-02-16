@@ -624,6 +624,12 @@ btr_search_update_hash_ref(
 		return;
 	}
 
+	if (cursor->index != index) {
+		ut_ad(cursor->index->id == index->id);
+		btr_search_drop_page_hash_index(block);
+		return;
+	}
+
 	ut_ad(block->page.id.space() == index->space);
 	ut_a(index == cursor->index);
 	ut_ad(!dict_index_is_ibuf(index));
@@ -1544,19 +1550,25 @@ btr_search_move_or_delete_hash_entries(
 	rw_lock_s_lock(latch);
 
 	ut_a(!new_block->index || new_block->index == index);
-	ut_a(!block->index || block->index == index);
+	ut_a(!block->index || block->index->id == index->id);
 	ut_ad(!(new_block->index || block->index)
 	      || !dict_index_is_ibuf(index));
 	assert_block_ahi_valid(block);
 	assert_block_ahi_valid(new_block);
 
 	if (new_block->index) {
+drop_exit:
 		rw_lock_s_unlock(latch);
 		btr_search_drop_page_hash_index(block);
 		return;
 	}
 
 	if (block->index) {
+
+		if (block->index != index) {
+			goto drop_exit;
+		}
+
 		ulint	n_fields = block->curr_n_fields;
 		ulint	n_bytes = block->curr_n_bytes;
 		ibool	left_side = block->curr_left_side;
@@ -1576,7 +1588,6 @@ btr_search_move_or_delete_hash_entries(
 		ut_ad(left_side == block->curr_left_side);
 		return;
 	}
-
 	rw_lock_s_unlock(latch);
 }
 
@@ -1613,6 +1624,12 @@ btr_search_update_hash_on_delete(btr_cur_t* cursor)
 
 	if (!index) {
 
+		return;
+	}
+
+	if (index != cursor->index) {
+		ut_ad(index->id == cursor->index->id);
+		btr_search_drop_page_hash_index(block);
 		return;
 	}
 
@@ -1685,6 +1702,12 @@ btr_search_update_hash_node_on_insert(btr_cur_t* cursor)
 
 	if (!index) {
 
+		return;
+	}
+
+	if (cursor->index != index) {
+		ut_ad(cursor->index->id == index->id);
+		btr_search_drop_page_hash_index(block);
 		return;
 	}
 
@@ -1774,6 +1797,12 @@ btr_search_update_hash_on_insert(btr_cur_t* cursor)
 #ifdef MYSQL_INDEX_DISABLE_AHI
 	ut_a(!index->disable_ahi);
 #endif
+	if (index != cursor->index) {
+		ut_ad(index->id == cursor->index->id);
+		btr_search_drop_page_hash_index(block);
+		return;
+	}
+
 	ut_a(index == cursor->index);
 	ut_ad(!dict_index_is_ibuf(index));
 
