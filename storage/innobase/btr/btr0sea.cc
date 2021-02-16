@@ -705,6 +705,12 @@ btr_search_update_hash_ref(
 		return;
 	}
 
+	if (index != cursor->index) {
+		ut_ad(index->id == cursor->index->id);
+		btr_search_drop_page_hash_index(block);
+		return;
+	}
+
 	ut_ad(block->page.id().space() == index->table->space_id);
 	ut_ad(index == cursor->index);
 	ut_ad(!dict_index_is_ibuf(index));
@@ -1718,6 +1724,11 @@ btr_search_move_or_delete_hash_entries(
 		return;
 	}
 
+	if (index->freed()) {
+		btr_search_drop_page_hash_index(block);
+		return;
+	}
+
 	ahi_latch->rd_lock(SRW_LOCK_CALL);
 
 	if (block->index) {
@@ -1776,6 +1787,11 @@ void btr_search_update_hash_on_delete(btr_cur_t* cursor)
 
 	if (!index) {
 
+		return;
+	}
+
+	if (index != cursor->index) {
+		btr_search_drop_page_hash_index(block);
 		return;
 	}
 
@@ -1844,6 +1860,12 @@ void btr_search_update_hash_node_on_insert(btr_cur_t *cursor,
 
 	if (!index) {
 
+		return;
+	}
+
+	if (index != cursor->index) {
+		ut_ad(index->id == cursor->index->id);
+		btr_search_drop_page_hash_index(block);
 		return;
 	}
 
@@ -1933,6 +1955,12 @@ void btr_search_update_hash_on_insert(btr_cur_t *cursor,
 #ifdef MYSQL_INDEX_DISABLE_AHI
 	ut_a(!index->disable_ahi);
 #endif
+	if (index != cursor->index) {
+		ut_ad(index->id == cursor->index->id);
+		btr_search_drop_page_hash_index(block);
+		return;
+	}
+
 	ut_a(index == cursor->index);
 	ut_ad(!dict_index_is_ibuf(index));
 
